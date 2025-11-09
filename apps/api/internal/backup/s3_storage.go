@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -42,6 +43,11 @@ type S3Storage struct {
 	client *minio.Client
 	bucket string
 	prefix string
+}
+
+// GetBucket returns the bucket name (for logging purposes)
+func (s *S3Storage) GetBucket() string {
+	return s.bucket
 }
 
 func NewS3Storage(config S3Config) (*S3Storage, error) {
@@ -153,7 +159,28 @@ func (s *S3Storage) UploadFileWithLogging(ctx context.Context, localPath string,
 	}
 
 	fileName := filepath.Base(localPath)
-	objectKey := s.getObjectKey(fileName)
+	// Extract connection name from local path if possible
+	// Path format: /backup/connection_name/filename or {backupDir}/connection_name/filename
+	connectionName := ""
+	// Normalize path separators for cross-platform compatibility
+	normalizedPath := filepath.ToSlash(localPath)
+	pathParts := strings.Split(normalizedPath, "/")
+	if len(pathParts) >= 2 {
+		// Try to find connection name in path (usually second-to-last part before filename)
+		// Skip common backup directory names
+		skipDirs := map[string]bool{
+			"backup": true, "backups": true, "": true,
+		}
+		for i := len(pathParts) - 2; i >= 0; i-- {
+			part := strings.TrimSpace(pathParts[i])
+			if part != "" && !skipDirs[strings.ToLower(part)] && !strings.Contains(part, ".") {
+				// This is likely the connection name (not a file extension)
+				connectionName = part
+				break
+			}
+		}
+	}
+	objectKey := s.getObjectKey(fileName, connectionName)
 
 	if logFunc != nil {
 		logFunc(fmt.Sprintf("[INFO] Uploading to S3 bucket '%s' with key '%s'...", s.bucket, objectKey))
@@ -252,13 +279,113 @@ func (s *S3Storage) TestConnection(ctx context.Context) error {
 	return nil
 }
 
-func (s *S3Storage) getObjectKey(fileName string) string {
-	if s.prefix == "" {
-		return fileName
+func (s *S3Storage) getObjectKey(fileName string, connectionName string) string {
+	// Sanitize connection name for use in S3 path
+	// Remove any leading/trailing slashes and ensure it's safe
+	connectionName = strings.Trim(connectionName, "/")
+	fileName = strings.TrimPrefix(fileName, "/")
+	
+	// Build path: prefix/connection_name/filename or connection_name/filename
+	parts := []string{}
+	if s.prefix != "" {
+		prefix := strings.TrimSuffix(s.prefix, "/")
+		parts = append(parts, prefix)
+	}
+	if connectionName != "" {
+		parts = append(parts, connectionName)
+	}
+	parts = append(parts, fileName)
+	
+	return strings.Join(parts, "/")
+}
+
+// UploadStream uploads data from an io.Reader directly to S3
+// This is useful for streaming backups without creating local files
+// connectionName is used to organize backups in folders per connection
+func (s *S3Storage) UploadStream(ctx context.Context, reader io.Reader, objectKey string, connectionName string, logFunc func(string)) (string, error) {
+	// Apply path prefix and connection folder to the object key
+	finalKey := s.getObjectKey(objectKey, connectionName)
+	
+	if logFunc != nil {
+		logFunc(fmt.Sprintf("[INFO] Starting streaming upload to S3 bucket '%s' with key '%s'...", s.bucket, finalKey))
+	}
+
+	// Use PutObject which accepts an io.Reader
+	// For unknown size, we use -1 (minio will determine size during upload)
+	_, err := s.client.PutObject(ctx, s.bucket, finalKey, reader, -1, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	})
+	if err != nil {
+		if logFunc != nil {
+			logFunc(fmt.Sprintf("[ERROR] S3 streaming upload failed: %v", err))
+		}
+		return "", fmt.Errorf("failed to stream upload to S3: %w", err)
+	}
+
+	if logFunc != nil {
+		logFunc(fmt.Sprintf("[INFO] Streaming upload completed successfully"))
+		logFunc(fmt.Sprintf("[INFO] File available at: s3://%s/%s", s.bucket, finalKey))
+	}
+
+	return finalKey, nil
+}
+
+// UploadCompressedStream uploads compressed data from an io.Reader directly to S3
+// The data is gzip-compressed on-the-fly during upload
+// connectionName is used to organize backups in folders per connection
+func (s *S3Storage) UploadCompressedStream(ctx context.Context, reader io.Reader, objectKey string, connectionName string, logFunc func(string)) (string, error) {
+	if logFunc != nil {
+		logFunc(fmt.Sprintf("[INFO] Starting compressed streaming upload to S3 bucket '%s' with key '%s'...", s.bucket, objectKey))
+		logFunc("[INFO] Compressing data on-the-fly during upload...")
+	}
+
+	// Create a pipe: gzip writer writes to pipe, pipe reader feeds S3
+	pr, pw := io.Pipe()
+	
+	// Gzip writer compresses data and writes to pipe
+	gzipWriter := gzip.NewWriter(pw)
+	
+	// Start goroutine to copy data from reader through gzip to pipe
+	go func() {
+		defer pw.Close()
+		defer gzipWriter.Close()
+		
+		_, err := io.Copy(gzipWriter, reader)
+		if err != nil {
+			pw.CloseWithError(fmt.Errorf("compression error: %w", err))
+			return
+		}
+	}()
+
+	// Upload compressed stream from pipe reader
+	// Use .gz extension for the object key if not already present
+	if !strings.HasSuffix(objectKey, ".gz") {
+		objectKey = objectKey + ".gz"
 	}
 	
-	// Ensure prefix doesn't end with / and fileName doesn't start with /
-	prefix := strings.TrimSuffix(s.prefix, "/")
-	fileName = strings.TrimPrefix(fileName, "/")
-	return fmt.Sprintf("%s/%s", prefix, fileName)
+	// Apply path prefix and connection folder to the object key
+	finalKey := s.getObjectKey(objectKey, connectionName)
+	
+	if logFunc != nil {
+		logFunc(fmt.Sprintf("[INFO] Uploading to bucket '%s' with key '%s'", s.bucket, finalKey))
+		logFunc(fmt.Sprintf("[INFO] Full S3 path: s3://%s/%s", s.bucket, finalKey))
+	}
+	
+	_, err := s.client.PutObject(ctx, s.bucket, finalKey, pr, -1, minio.PutObjectOptions{
+		ContentType: "application/gzip",
+	})
+	if err != nil {
+		if logFunc != nil {
+			logFunc(fmt.Sprintf("[ERROR] S3 compressed streaming upload failed: %v", err))
+		}
+		pr.Close()
+		return "", fmt.Errorf("failed to stream compressed upload to S3: %w", err)
+	}
+
+	if logFunc != nil {
+		logFunc(fmt.Sprintf("[INFO] Compressed streaming upload completed successfully"))
+		logFunc(fmt.Sprintf("[INFO] File available at: s3://%s/%s", s.bucket, finalKey))
+	}
+
+	return finalKey, nil
 }

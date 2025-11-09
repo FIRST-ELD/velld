@@ -79,7 +79,6 @@ export function BackupJobViewer({ open, onOpenChange, backupId, backup: initialB
       { id: "prepare", name: "Preparing Database Backup", status: "pending" },
       { id: "backup", name: "Creating Database Backup", status: "pending" },
       { id: "upload", name: "Uploading to S3 Storage", status: "pending" },
-      { id: "cleanup", name: "Cleaning up", status: "pending" },
     ];
 
     stepsRef.current = new Map(initialSteps.map(step => [step.id, step]));
@@ -151,12 +150,6 @@ export function BackupJobViewer({ open, onOpenChange, backupId, backup: initialB
           }
           hasChanges = true;
         }
-        const cleanupStep = newSteps.get("cleanup");
-        if (cleanupStep && cleanupStep.status === "pending") {
-          cleanupStep.status = "in_progress";
-          cleanupStep.startTime = Date.now();
-          hasChanges = true;
-        }
       }
 
       if (logLower.includes("failed to upload") || logLower.includes("s3 upload failed")) {
@@ -193,31 +186,6 @@ export function BackupJobViewer({ open, onOpenChange, backupId, backup: initialB
         }
       }
 
-      if (logLower.includes("cleaning up") || logLower.includes("cleanup")) {
-        const step = newSteps.get("cleanup");
-        if (step && step.status === "pending") {
-          step.status = "in_progress";
-          step.startTime = Date.now();
-          hasChanges = true;
-        }
-      }
-
-      // Detect cleanup completion
-      if (logLower.includes("local backup file removed") || 
-          logLower.includes("backup completed and uploaded to all s3 providers") ||
-          logLower.includes("backup uploaded successfully to all") ||
-          (logLower.includes("success") && logLower.includes("backup completed") && logLower.includes("uploaded"))) {
-        const step = newSteps.get("cleanup");
-        if (step && step.status === "in_progress") {
-          step.status = "success";
-          step.endTime = Date.now();
-          if (step.startTime) {
-            const duration = ((step.endTime - step.startTime) / 1000).toFixed(0);
-            step.duration = formatDuration(parseInt(duration));
-          }
-          hasChanges = true;
-        }
-      }
     });
 
     // Update durations for in-progress steps

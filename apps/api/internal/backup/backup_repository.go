@@ -236,22 +236,55 @@ func (r *BackupRepository) UpdateBackup(backup *Backup) error {
 		completedTimeStr = &str
 	}
 
-	_, err := r.db.Exec(`
-		UPDATE backups SET
-			status = $1,
-			path = $2,
-			s3_object_key = $3,
-			s3_provider_id = $4,
-			size = $5,
-			logs = $6,
-			started_time = $7,
-			completed_time = $8,
-			updated_at = $9
-		WHERE id = $10`,
-		backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.Logs,
-		backup.StartedTime.Format(time.RFC3339), completedTimeStr,
-		time.Now().Format(time.RFC3339), backup.ID)
-	return err
+	// Don't overwrite logs in UpdateBackup - logs should only be updated via AppendLog
+	// This prevents clearing accumulated logs when updating backup status
+	// If backup.Logs is provided and not nil, we'll update it, otherwise preserve existing logs
+	var logsValue interface{}
+	if backup.Logs != nil && *backup.Logs != "" {
+		// Only update logs if explicitly provided and not empty
+		logsValue = *backup.Logs
+	} else {
+		// Preserve existing logs by using COALESCE or not updating the field
+		// We'll use a subquery to keep existing logs
+		logsValue = nil // Will use COALESCE in SQL
+	}
+
+	if logsValue != nil {
+		// Update with new logs value
+		_, err := r.db.Exec(`
+			UPDATE backups SET
+				status = $1,
+				path = $2,
+				s3_object_key = $3,
+				s3_provider_id = $4,
+				size = $5,
+				logs = $6,
+				started_time = $7,
+				completed_time = $8,
+				updated_at = $9
+			WHERE id = $10`,
+			backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, logsValue,
+			backup.StartedTime.Format(time.RFC3339), completedTimeStr,
+			time.Now().Format(time.RFC3339), backup.ID)
+		return err
+	} else {
+		// Don't update logs field - preserve existing logs
+		_, err := r.db.Exec(`
+			UPDATE backups SET
+				status = $1,
+				path = $2,
+				s3_object_key = $3,
+				s3_provider_id = $4,
+				size = $5,
+				started_time = $6,
+				completed_time = $7,
+				updated_at = $8
+			WHERE id = $9`,
+			backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size,
+			backup.StartedTime.Format(time.RFC3339), completedTimeStr,
+			time.Now().Format(time.RFC3339), backup.ID)
+		return err
+	}
 }
 
 func (r *BackupRepository) GetBackupsOlderThan(connectionID string, cutoffTime time.Time) ([]*Backup, error) {
@@ -484,22 +517,130 @@ func (r *BackupRepository) UpdateBackupStatusAndSchedule(id string, status strin
 	return err
 }
 
-// AppendLog appends a log line to the backup's logs
-// Uses mutex to prevent SQLite "database is locked" errors from concurrent writes
-// Implements retry logic with exponential backoff for transient lock errors
+// AppendLog appends log lines to the backup_logs table
+// This is much more efficient than storing logs in a TEXT column
+// Supports batch inserts for better performance
 func (r *BackupRepository) AppendLog(backupID string, logLine string) error {
 	r.appendLogMutex.Lock()
 	defer r.appendLogMutex.Unlock()
+
+	// Split logLine by newlines to handle multiple lines
+	lines := strings.Split(logLine, "\n")
+	if len(lines) == 0 {
+		return nil
+	}
 
 	maxRetries := 5
 	baseDelay := 10 * time.Millisecond
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		// Use a transaction to read, append, and write back
 		tx, err := r.db.Begin()
 		if err != nil {
 			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
-				// Exponential backoff: 10ms, 20ms, 40ms, 80ms, 160ms
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		// Get the current max line number for this backup
+		var maxLineNumber sql.NullInt64
+		err = tx.QueryRow(`SELECT COALESCE(MAX(line_number), 0) FROM backup_logs WHERE backup_id = $1`, backupID).Scan(&maxLineNumber)
+		if err != nil && err != sql.ErrNoRows {
+			tx.Rollback()
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		startLineNumber := int64(1)
+		if maxLineNumber.Valid {
+			startLineNumber = maxLineNumber.Int64 + 1
+		}
+
+		// Insert all log lines in a batch for better performance
+		now := time.Now().Format(time.RFC3339)
+		validLines := make([]string, 0, len(lines))
+		
+		// Filter out empty lines and collect valid ones
+		for _, line := range lines {
+			if line != "" {
+				validLines = append(validLines, line)
+			}
+		}
+		
+		if len(validLines) == 0 {
+			tx.Rollback()
+			return nil // No valid lines to insert
+		}
+		
+		// Use batch insert for better performance
+		// Build VALUES clause for batch insert
+		valuePlaceholders := make([]string, len(validLines))
+		args := make([]interface{}, 0, len(validLines)*5)
+		argIndex := 1
+		
+		for i, line := range validLines {
+			logID := uuid.New().String()
+			lineNumber := startLineNumber + int64(i)
+			valuePlaceholders[i] = fmt.Sprintf("($%d, $%d, $%d, $%d, $%d)", 
+				argIndex, argIndex+1, argIndex+2, argIndex+3, argIndex+4)
+			args = append(args, logID, backupID, line, lineNumber, now)
+			argIndex += 5
+		}
+		
+		query := fmt.Sprintf(`
+			INSERT INTO backup_logs (id, backup_id, log_line, line_number, created_at)
+			VALUES %s`,
+			strings.Join(valuePlaceholders, ", "))
+		
+		_, err = tx.Exec(query, args...)
+		if err != nil {
+			// If table doesn't exist yet, fall back to old method
+			if strings.Contains(err.Error(), "no such table: backup_logs") {
+				tx.Rollback()
+				return r.appendLogLegacy(backupID, logLine)
+			}
+			
+			tx.Rollback()
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		// Success
+		return nil
+	}
+
+	return fmt.Errorf("failed to append log after %d retries", maxRetries)
+}
+
+// appendLogLegacy appends logs to the old logs column (for backward compatibility)
+func (r *BackupRepository) appendLogLegacy(backupID string, logLine string) error {
+	maxRetries := 5
+	baseDelay := 10 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		tx, err := r.db.Begin()
+		if err != nil {
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
 				delay := baseDelay * time.Duration(1<<uint(attempt))
 				time.Sleep(delay)
 				continue
@@ -548,17 +689,41 @@ func (r *BackupRepository) AppendLog(backupID string, logLine string) error {
 			return err
 		}
 
-		// Success
 		return nil
 	}
 
 	return fmt.Errorf("failed to append log after %d retries", maxRetries)
 }
 
-// GetBackupLogs retrieves the logs for a backup
+// GetBackupLogs retrieves the logs for a backup from the backup_logs table
+// Falls back to the old logs column for backward compatibility
 func (r *BackupRepository) GetBackupLogs(backupID string) (string, error) {
+	// Try to get logs from the new backup_logs table first
+	rows, err := r.db.Query(`
+		SELECT log_line 
+		FROM backup_logs 
+		WHERE backup_id = $1 
+		ORDER BY line_number ASC`,
+		backupID)
+	
+	if err == nil {
+		defer rows.Close()
+		var logLines []string
+		for rows.Next() {
+			var logLine string
+			if err := rows.Scan(&logLine); err == nil {
+				logLines = append(logLines, logLine)
+			}
+		}
+		
+		if len(logLines) > 0 {
+			return strings.Join(logLines, "\n"), nil
+		}
+	}
+
+	// Fallback to old logs column for backward compatibility
 	var logs sql.NullString
-	err := r.db.QueryRow(`SELECT logs FROM backups WHERE id = $1`, backupID).Scan(&logs)
+	err = r.db.QueryRow(`SELECT logs FROM backups WHERE id = $1`, backupID).Scan(&logs)
 	if err != nil {
 		return "", err
 	}

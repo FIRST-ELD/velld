@@ -21,16 +21,16 @@ func (r *SettingsRepository) GetUserSettings(userID uuid.UUID) (*UserSettings, e
 	var createdAtStr, updatedAtStr string
 
 	err := r.db.QueryRow(`
-        SELECT id, user_id, notify_dashboard, notify_email, notify_webhook,
-               webhook_url, email, smtp_host, smtp_port, smtp_username, 
+        SELECT id, user_id, notify_dashboard, notify_email, notify_webhook, notify_telegram,
+               webhook_url, email, telegram_bot_token, telegram_chat_id, smtp_host, smtp_port, smtp_username, 
                smtp_password, s3_enabled, s3_endpoint, s3_region, s3_bucket,
                s3_access_key, s3_secret_key, s3_use_ssl, s3_path_prefix,
                created_at, updated_at
         FROM user_settings
         WHERE user_id = $1`, userID).Scan(
 		&settings.ID, &settings.UserID, &settings.NotifyDashboard,
-		&settings.NotifyEmail, &settings.NotifyWebhook, &settings.WebhookURL,
-		&settings.Email, &settings.SMTPHost, &settings.SMTPPort,
+		&settings.NotifyEmail, &settings.NotifyWebhook, &settings.NotifyTelegram, &settings.WebhookURL,
+		&settings.Email, &settings.TelegramBotToken, &settings.TelegramChatID, &settings.SMTPHost, &settings.SMTPPort,
 		&settings.SMTPUsername, &settings.SMTPPassword,
 		&settings.S3Enabled, &settings.S3Endpoint, &settings.S3Region, &settings.S3Bucket,
 		&settings.S3AccessKey, &settings.S3SecretKey, &settings.S3UseSSL, &settings.S3PathPrefix,
@@ -71,15 +71,15 @@ func (r *SettingsRepository) GetUserSettings(userID uuid.UUID) (*UserSettings, e
 func (r *SettingsRepository) CreateUserSettings(settings *UserSettings) error {
 	_, err := r.db.Exec(`
         INSERT INTO user_settings (
-            id, user_id, notify_dashboard, notify_email, notify_webhook,
-            webhook_url, email, smtp_host, smtp_port, smtp_username, 
+            id, user_id, notify_dashboard, notify_email, notify_webhook, notify_telegram,
+            webhook_url, email, telegram_bot_token, telegram_chat_id, smtp_host, smtp_port, smtp_username, 
             smtp_password, s3_enabled, s3_endpoint, s3_region, s3_bucket,
             s3_access_key, s3_secret_key, s3_use_ssl, s3_path_prefix,
             created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
 		settings.ID, settings.UserID, settings.NotifyDashboard,
-		settings.NotifyEmail, settings.NotifyWebhook, settings.WebhookURL,
-		settings.Email, settings.SMTPHost, settings.SMTPPort,
+		settings.NotifyEmail, settings.NotifyWebhook, settings.NotifyTelegram, settings.WebhookURL,
+		settings.Email, settings.TelegramBotToken, settings.TelegramChatID, settings.SMTPHost, settings.SMTPPort,
 		settings.SMTPUsername, settings.SMTPPassword,
 		settings.S3Enabled, settings.S3Endpoint, settings.S3Region, settings.S3Bucket,
 		settings.S3AccessKey, settings.S3SecretKey, settings.S3UseSSL, settings.S3PathPrefix,
@@ -91,16 +91,16 @@ func (r *SettingsRepository) UpdateUserSettings(settings *UserSettings) error {
 	settings.UpdatedAt = time.Now()
 	_, err := r.db.Exec(`
         UPDATE user_settings SET
-            notify_dashboard = $1, notify_email = $2, notify_webhook = $3,
-            webhook_url = $4, email = $5, smtp_host = $6, smtp_port = $7,
-            smtp_username = $8, smtp_password = $9, s3_enabled = $10,
-            s3_endpoint = $11, s3_region = $12, s3_bucket = $13,
-            s3_access_key = $14, s3_secret_key = $15, s3_use_ssl = $16,
-            s3_path_prefix = $17, updated_at = $18
-        WHERE user_id = $19`,
-		settings.NotifyDashboard, settings.NotifyEmail, settings.NotifyWebhook,
-		settings.WebhookURL, settings.Email, settings.SMTPHost, settings.SMTPPort,
-		settings.SMTPUsername, settings.SMTPPassword,
+            notify_dashboard = $1, notify_email = $2, notify_webhook = $3, notify_telegram = $4,
+            webhook_url = $5, email = $6, telegram_bot_token = $7, telegram_chat_id = $8,
+            smtp_host = $9, smtp_port = $10, smtp_username = $11, smtp_password = $12,
+            s3_enabled = $13, s3_endpoint = $14, s3_region = $15, s3_bucket = $16,
+            s3_access_key = $17, s3_secret_key = $18, s3_use_ssl = $19,
+            s3_path_prefix = $20, updated_at = $21
+        WHERE user_id = $22`,
+		settings.NotifyDashboard, settings.NotifyEmail, settings.NotifyWebhook, settings.NotifyTelegram,
+		settings.WebhookURL, settings.Email, settings.TelegramBotToken, settings.TelegramChatID,
+		settings.SMTPHost, settings.SMTPPort, settings.SMTPUsername, settings.SMTPPassword,
 		settings.S3Enabled, settings.S3Endpoint, settings.S3Region, settings.S3Bucket,
 		settings.S3AccessKey, settings.S3SecretKey, settings.S3UseSSL, settings.S3PathPrefix,
 		settings.UpdatedAt, settings.UserID)

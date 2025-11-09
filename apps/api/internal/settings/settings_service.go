@@ -25,6 +25,11 @@ func NewSettingsService(repo *SettingsRepository, crypto *common.EncryptionServi
 	}
 }
 
+// GetCryptoService returns the encryption service (for use in handlers)
+func (s *SettingsService) GetCryptoService() *common.EncryptionService {
+	return s.cryptoService
+}
+
 func (s *SettingsService) GetUserSettings(userID uuid.UUID) (*UserSettings, error) {
 	settings, err := s.repo.GetUserSettings(userID)
 	if err != nil {
@@ -37,6 +42,7 @@ func (s *SettingsService) GetUserSettings(userID uuid.UUID) (*UserSettings, erro
 	// Remove sensitive data before returning
 	settings.SMTPPassword = nil
 	settings.S3SecretKey = nil
+	settings.TelegramBotToken = nil
 	return settings, nil
 }
 
@@ -103,8 +109,22 @@ func (s *SettingsService) UpdateUserSettings(userID uuid.UUID, req *UpdateSettin
 	if req.NotifyWebhook != nil {
 		settings.NotifyWebhook = *req.NotifyWebhook
 	}
+	if req.NotifyTelegram != nil {
+		settings.NotifyTelegram = *req.NotifyTelegram
+	}
 	if req.WebhookURL != nil {
 		settings.WebhookURL = req.WebhookURL
+	}
+	if req.TelegramBotToken != nil {
+		// Encrypt Telegram bot token before storing
+		encryptedToken, err := s.cryptoService.Encrypt(*req.TelegramBotToken)
+		if err != nil {
+			return nil, err
+		}
+		settings.TelegramBotToken = &encryptedToken
+	}
+	if req.TelegramChatID != nil {
+		settings.TelegramChatID = req.TelegramChatID
 	}
 	if req.Email != nil && !envSMTPFrom {
 		settings.Email = req.Email
@@ -171,6 +191,7 @@ func (s *SettingsService) UpdateUserSettings(userID uuid.UUID, req *UpdateSettin
 	// Remove sensitive data before returning
 	settings.SMTPPassword = nil
 	settings.S3SecretKey = nil
+	settings.TelegramBotToken = nil
 	return settings, nil
 }
 

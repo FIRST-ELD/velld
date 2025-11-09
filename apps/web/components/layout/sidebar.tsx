@@ -1,6 +1,6 @@
 "use client";
 
-import { Layout, Server, Settings, History, Menu, X, Activity } from "lucide-react";
+import { Layout, Server, Settings, History, Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { usePathname } from "next/navigation";
@@ -12,7 +12,6 @@ import { ThemeToggle } from "@/components/theme-toggle";
 const navigation = [
   { name: "Dashboard", href: "/", icon: Layout },
   { name: "Connections", href: "/connections", icon: Server },
-  { name: "Jobs", href: "/jobs", icon: Activity },
   { name: "History", href: "/history", icon: History },
   // { name: "Security", href: "/security", icon: Shield },
   { name: "Settings", href: "/settings", icon: Settings },

@@ -69,3 +69,35 @@ func (h *SettingsHandler) TestS3Connection(w http.ResponseWriter, r *http.Reques
 
 	response.SendSuccess(w, "S3 connection test successful", nil)
 }
+
+func (h *SettingsHandler) TestTelegramConnection(w http.ResponseWriter, r *http.Request) {
+	var req TestTelegramConnectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.SendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	chatInfo, err := TestTelegramConnection(req.BotToken, req.ChatID, h.service.GetCryptoService())
+	if err != nil {
+		response.SendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	response.SendSuccess(w, "Telegram connection test successful", chatInfo)
+}
+
+func (h *SettingsHandler) GetTelegramChats(w http.ResponseWriter, r *http.Request) {
+	botToken := r.URL.Query().Get("bot_token")
+	if botToken == "" {
+		response.SendError(w, http.StatusBadRequest, "bot_token query parameter is required")
+		return
+	}
+
+	chats, err := GetTelegramChats(botToken, h.service.GetCryptoService())
+	if err != nil {
+		response.SendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	response.SendSuccess(w, "Telegram chats retrieved successfully", chats)
+}

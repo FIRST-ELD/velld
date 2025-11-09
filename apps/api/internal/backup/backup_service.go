@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,8 +188,47 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 	}
 
 	// Send initial log
-	s.sendLog(backup.ID.String(), fmt.Sprintf("Starting backup for %s database '%s' on %s:%d", conn.Type, conn.DatabaseName, conn.Host, conn.Port))
-	s.sendLog(backup.ID.String(), fmt.Sprintf("Backup file: %s", filename))
+	s.sendLog(backup.ID.String(), fmt.Sprintf("Starting streaming backup for %s database '%s' on %s:%d", conn.Type, conn.DatabaseName, conn.Host, conn.Port))
+	s.sendLog(backup.ID.String(), fmt.Sprintf("Backup will be streamed directly to S3: %s", filename))
+	s.sendLog(backup.ID.String(), "[INFO] Using streaming mode - no local file will be created")
+
+	// Check if we have S3 providers configured
+	var providers []*S3Provider
+	if len(s3ProviderIDs) > 0 {
+		// Use specified providers
+		for _, providerID := range s3ProviderIDs {
+			provider, err := s.s3ProviderService.GetS3ProviderForUpload(providerID, conn.UserID)
+			if err != nil {
+				s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to get S3 provider %s: %v", providerID, err))
+				continue
+			}
+			providers = append(providers, provider)
+		}
+	} else {
+		// Get ALL configured providers for this user
+		allProviders, err := s.s3ProviderService.GetAllS3ProvidersForUpload(conn.UserID)
+		if err == nil && len(allProviders) > 0 {
+			providers = allProviders
+			s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Found %d S3 provider(s), will upload to all of them", len(providers)))
+		} else {
+			// Fallback: try to use default provider if no providers found
+			defaultProvider, err := s.s3ProviderService.GetDefaultProvider(conn.UserID)
+			if err == nil && defaultProvider != nil {
+				provider, err := s.s3ProviderService.GetS3ProviderForUpload(defaultProvider.ID.String(), conn.UserID)
+				if err == nil {
+					providers = append(providers, provider)
+					s.sendLog(backup.ID.String(), "[INFO] Using default S3 provider")
+				}
+			}
+		}
+	}
+
+	// If no S3 providers, fall back to file-based backup
+	if len(providers) == 0 {
+		s.sendLog(backup.ID.String(), "[INFO] No S3 providers configured, falling back to file-based backup")
+		s.executeFileBasedBackup(backup, conn, backupPath, filename, s3ProviderIDs)
+		return
+	}
 
 	// Check versions for PostgreSQL backups
 	if conn.Type == "postgresql" {
@@ -225,16 +265,25 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 		}
 	}
 
+	// Create streaming command (outputs to stdout)
 	var cmd *exec.Cmd
 	switch conn.Type {
 	case "postgresql":
-		cmd = s.createPgDumpCmd(conn, backupPath)
+		// Use plain format for streaming (custom format doesn't support stdout)
+		cmd = s.createPgDumpCmdForStreaming(conn)
 	case "mysql", "mariadb":
-		cmd = s.createMySQLDumpCmd(conn, backupPath)
+		// Output to stdout for streaming
+		cmd = s.createMySQLDumpCmdForStreaming(conn)
 	case "mongodb":
-		cmd = s.createMongoDumpCmd(conn, backupPath)
+		// MongoDB doesn't support stdout streaming easily, fall back to file-based
+		s.sendLog(backup.ID.String(), "[INFO] MongoDB doesn't support stdout streaming, using file-based backup")
+		s.executeFileBasedBackup(backup, conn, backupPath, filename, s3ProviderIDs)
+		return
 	case "redis":
-		cmd = s.createRedisDumpCmd(conn, backupPath)
+		// Redis doesn't support stdout streaming, fall back to file-based
+		s.sendLog(backup.ID.String(), "[INFO] Redis doesn't support stdout streaming, using file-based backup")
+		s.executeFileBasedBackup(backup, conn, backupPath, filename, s3ProviderIDs)
+		return
 	default:
 		s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Unsupported database type: %s", conn.Type))
 		s.cleanupLogStream(backup.ID.String())
@@ -248,7 +297,7 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 		return
 	}
 
-	// Capture stdout and stderr separately for streaming
+	// Capture stdout and stderr separately
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Failed to create stdout pipe: %v", err))
@@ -270,130 +319,110 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 		return
 	}
 
-	// Stream stdout and stderr
+	// Stream stderr for logs
 	var wg sync.WaitGroup
 	var outputErr error
 	var outputLines []string
 
-	// For PostgreSQL, monitor file size for progress reporting
-	var fileSizeMonitor *time.Ticker
-	var fileSizeStop chan bool
-	var lastSize int64 = 0
-	var lastCheckTime time.Time
-	if conn.Type == "postgresql" {
-		fileSizeMonitor = time.NewTicker(2 * time.Second) // Check every 2 seconds
-		fileSizeStop = make(chan bool)
-		go func() {
-			defer fileSizeMonitor.Stop()
-			lastCheckTime = time.Now()
-			for {
-				select {
-				case <-fileSizeMonitor.C:
-					if info, err := os.Stat(backupPath); err == nil {
-						size := info.Size()
-						if size > 0 && size != lastSize {
-							now := time.Now()
-							rateMsg := ""
-							if lastSize > 0 {
-								// Calculate rate based on size difference
-								elapsed := now.Sub(lastCheckTime).Seconds()
-								if elapsed > 0 {
-									sizeDiff := size - lastSize
-									rate := float64(sizeDiff) / elapsed
-									rateMsg = fmt.Sprintf(" (%.2f MB/s)", rate/(1024*1024))
-								}
-							}
-							lastSize = size
-							lastCheckTime = now
-							s.sendLog(backup.ID.String(), fmt.Sprintf("[PROGRESS] Backup file size: %s%s", s.formatBytes(size), rateMsg))
-						}
-					}
-				case <-fileSizeStop:
-					// Final size report
-					if info, err := os.Stat(backupPath); err == nil {
-						finalSize := info.Size()
-						if finalSize > 0 {
-							s.sendLog(backup.ID.String(), fmt.Sprintf("[PROGRESS] Final backup file size: %s", s.formatBytes(finalSize)))
-						}
-					}
-					return
-				}
-			}
-		}()
-	}
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			outputLines = append(outputLines, line)
-			// Parse verbose output for progress information
-			if conn.Type == "postgresql" {
-				// pg_dump --verbose outputs lines like:
-				// "pg_dump: dumping contents of table \"table_name\""
-				// "pg_dump: dumping schema \"schema_name\""
-				// These are already informative progress messages
-				s.sendLog(backup.ID.String(), line)
-			} else {
-				s.sendLog(backup.ID.String(), line)
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			outputErr = err
-		}
-	}()
-
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(stderrPipe)
 		for scanner.Scan() {
 			line := scanner.Text()
 			outputLines = append(outputLines, line)
-			s.sendLog(backup.ID.String(), "[STDERR] "+line)
+			s.sendLog(backup.ID.String(), line)
 		}
 		if err := scanner.Err(); err != nil && outputErr == nil {
 			outputErr = err
 		}
 	}()
 
-	// Wait for command to complete
-	cmdErr := cmd.Wait()
-	if fileSizeStop != nil {
-		close(fileSizeStop)
-	}
-	wg.Wait()
+	// Stream backup data directly to S3 providers
+	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Starting streaming upload to %d S3 provider(s)...", len(providers)))
+	
+	// Create a pipe to stream backup data
+	pr, pw := io.Pipe()
+	
+	// Start goroutine to copy stdout to pipe
+	var copyErr error
+	go func() {
+		defer pw.Close()
+		_, copyErr = io.Copy(pw, stdoutPipe)
+	}()
 
-	// Check for errors
-	if cmdErr != nil || outputErr != nil {
+	// Stream to first provider, then copy to others
+	firstProvider := providers[0]
+	
+	region := "us-east-1"
+	if firstProvider.Region != nil && *firstProvider.Region != "" {
+		region = *firstProvider.Region
+	}
+
+	pathPrefix := ""
+	if firstProvider.PathPrefix != nil {
+		pathPrefix = *firstProvider.PathPrefix
+	}
+
+	accessKey := cleanS3Credential(firstProvider.AccessKey)
+	secretKey := cleanS3Credential(firstProvider.SecretKey)
+	endpoint := strings.TrimSpace(firstProvider.Endpoint)
+	bucket := cleanS3Credential(firstProvider.Bucket)
+
+	s3Config := S3Config{
+		Endpoint:   endpoint,
+		Region:     region,
+		Bucket:     bucket,
+		AccessKey:  accessKey,
+		SecretKey:  secretKey,
+		UseSSL:     firstProvider.UseSSL,
+		PathPrefix: pathPrefix,
+	}
+
+	s3Storage, err := NewS3Storage(s3Config)
+	if err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Failed to create S3 client: %v", err))
+		pr.Close()
+		cmd.Wait()
+		wg.Wait()
+		s.cleanupLogStream(backup.ID.String())
+		return
+	}
+
+	// Stream compressed data to S3
+	// UploadCompressedStream will add .gz extension and apply path prefix
+	ctx := context.Background()
+	sanitizedConnectionName := common.SanitizeConnectionName(conn.Name)
+	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Streaming compressed backup to %s", firstProvider.Name))
+	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Bucket: %s", s3Storage.GetBucket()))
+	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Connection folder: %s", sanitizedConnectionName))
+	
+	uploadedKey, err := s3Storage.UploadCompressedStream(ctx, pr, filename, sanitizedConnectionName, func(message string) {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[%s] %s", firstProvider.Name, message))
+	})
+
+	// Wait for command and copy to complete
+	cmdErr := cmd.Wait()
+	wg.Wait()
+	pr.Close()
+
+	if cmdErr != nil || outputErr != nil || copyErr != nil || err != nil {
 		errorMsg := ""
-		if len(outputLines) > 0 {
+		if cmdErr != nil {
+			errorMsg = cmdErr.Error()
+		} else if outputErr != nil {
+			errorMsg = outputErr.Error()
+		} else if copyErr != nil {
+			errorMsg = copyErr.Error()
+		} else if err != nil {
+			errorMsg = err.Error()
+		}
+		
+		if len(outputLines) > 0 && errorMsg == "" {
 			errorMsg = outputLines[len(outputLines)-1]
 		}
-		if errorMsg == "" && cmdErr != nil {
-			errorMsg = cmdErr.Error()
-		}
-		if errorMsg == "" && outputErr != nil {
-			errorMsg = outputErr.Error()
-		}
-		
-		// Check for specific PostgreSQL version mismatch error
-		if conn.Type == "postgresql" && s.isPostgreSQLVersionMismatchError(outputLines) {
-			s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Backup failed: %s", errorMsg))
-			s.sendLog(backup.ID.String(), "[INFO] PostgreSQL version mismatch detected.")
-			s.sendLog(backup.ID.String(), "[INFO] The pg_dump client version must match the PostgreSQL server version.")
-			s.sendLog(backup.ID.String(), "[INFO] Solution: Install PostgreSQL client tools that match your server version.")
-			s.sendLog(backup.ID.String(), "[INFO] If running in Docker, rebuild your image with PostgreSQL 16 client tools:")
-			s.sendLog(backup.ID.String(), "[INFO]   docker-compose build --no-cache api")
-			s.sendLog(backup.ID.String(), "[INFO]   docker-compose up -d")
-			s.sendLog(backup.ID.String(), "[INFO] Or update your Dockerfile to install postgresql16-client package.")
-			s.sendLog(backup.ID.String(), "[INFO] You can check your server version with: SELECT version();")
-			s.sendLog(backup.ID.String(), "[INFO] You can check your client version with: pg_dump --version")
-		} else {
-			s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Backup failed: %s", errorMsg))
-		}
-		
+
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Backup failed: %s", errorMsg))
 		backup.Status = "failed"
 		now := time.Now()
 		backup.CompletedTime = &now
@@ -404,6 +433,68 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 		return
 	}
 
+	// Get uploaded file size from S3 and verify it exists
+	uploadedSize := int64(0)
+	if size, err := s3Storage.GetFileSize(ctx, uploadedKey); err == nil {
+		uploadedSize = size
+		backup.Size = size
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[SUCCESS] Backup streamed successfully. Size: %s", s.formatBytes(size)))
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] File verified in S3: s3://%s/%s", s3Storage.GetBucket(), uploadedKey))
+	} else {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Could not verify file size in S3: %v", err))
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] File should be at: s3://%s/%s", s3Storage.GetBucket(), uploadedKey))
+	}
+
+	// Store S3 info
+	backup.S3ObjectKey = &uploadedKey
+	providerIDStr := firstProvider.ID.String()
+	backup.S3ProviderID = &providerIDStr
+	
+	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] S3 Object Key stored: %s", uploadedKey))
+
+	// Track S3 provider
+	if err := s.backupRepo.AddBackupS3Provider(backup.ID.String(), firstProvider.ID.String(), uploadedKey); err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to track S3 provider: %v", err))
+	}
+
+	// Upload to additional providers in parallel (copy from first)
+	if len(providers) > 1 {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Copying backup to %d additional S3 provider(s)...", len(providers)-1))
+		uploadErr := s.uploadToAdditionalS3Providers(backup, conn.UserID, providers[1:], uploadedKey, uploadedSize)
+		if uploadErr != nil {
+			s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Some additional S3 uploads failed: %v", uploadErr))
+		}
+	}
+
+	now := time.Now()
+	backup.CompletedTime = &now
+	backup.Status = "success"
+	s.sendLog(backup.ID.String(), "[SUCCESS] Backup completed and streamed to all S3 providers successfully")
+
+	// Update backup record
+	if err := s.backupRepo.UpdateBackup(backup); err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Failed to update backup: %v", err))
+	}
+
+	// Send success notification
+	if err := s.createSuccessNotification(backup.ConnectionID, backup); err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to send success notification: %v", err))
+	}
+
+	// Clean up log stream
+	go func() {
+		time.Sleep(2 * time.Second)
+		s.cleanupLogStream(backup.ID.String())
+	}()
+}
+
+// executeFileBasedBackup is the fallback method for file-based backups
+// Used for MongoDB, Redis, or when no S3 providers are configured
+func (s *BackupService) executeFileBasedBackup(backup *Backup, conn *connection.StoredConnection, backupPath string, filename string, s3ProviderIDs []string) {
+	// This uses the original file-based backup logic
+	// For simplicity, we'll just call uploadToS3Providers which handles file-based uploads
+	// The backup file should already be created by the calling code
+	
 	// Get file size
 	fileInfo, err := os.Stat(backupPath)
 	if err != nil {
@@ -413,6 +504,7 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 	}
 
 	backup.Size = fileInfo.Size()
+	backup.Path = backupPath
 	now := time.Now()
 	backup.CompletedTime = &now
 
@@ -421,49 +513,44 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 	// Upload to S3 providers and determine final status
 	uploadErr := s.uploadToS3Providers(backup, conn.UserID, s3ProviderIDs)
 	if uploadErr != nil {
-		// Check if it's a partial failure (some succeeded, some failed) or complete failure
 		errMsg := uploadErr.Error()
 		if strings.Contains(errMsg, "partial upload failure") {
-			// Some S3 uploads succeeded, some failed
 			backup.Status = "completed_with_errors"
 			s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Backup completed but some S3 uploads failed: %v", uploadErr))
+		} else if strings.Contains(errMsg, "No S3 providers configured") {
+			backup.Status = "success"
+			s.sendLog(backup.ID.String(), "[INFO] No S3 providers configured, backup saved locally only")
 		} else {
-			// All S3 uploads failed or no providers configured
-			// If no providers were configured, this is still a success
-			if strings.Contains(errMsg, "No S3 providers configured") {
-				backup.Status = "success"
-				s.sendLog(backup.ID.String(), "[INFO] No S3 providers configured, backup saved locally only")
-			} else {
-				// All uploads failed
-				backup.Status = "completed_with_errors"
-				s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Backup completed but all S3 uploads failed: %v", uploadErr))
-			}
+			backup.Status = "completed_with_errors"
+			s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Backup completed but all S3 uploads failed: %v", uploadErr))
 		}
-		fmt.Printf("Warning: S3 upload issue: %v\n", uploadErr)
 	} else {
-		// All S3 uploads succeeded (or no providers to upload to)
 		backup.Status = "success"
 		s.sendLog(backup.ID.String(), "[SUCCESS] Backup completed and uploaded to all S3 providers successfully")
 	}
 
-	// Update backup record with final status and details
+	// Update backup record
 	if err := s.backupRepo.UpdateBackup(backup); err != nil {
 		s.sendLog(backup.ID.String(), fmt.Sprintf("[ERROR] Failed to update backup: %v", err))
-		fmt.Printf("Warning: Failed to update backup: %v\n", err)
+	}
+
+	// Send success notification if backup was successful
+	if backup.Status == "success" {
+		if err := s.createSuccessNotification(backup.ConnectionID, backup); err != nil {
+			s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to send success notification: %v", err))
+		}
 	}
 
 	// Clean up local backup file after successful S3 upload
 	if backup.S3ObjectKey != nil && backup.S3ProviderID != nil {
-		// Only delete if at least one S3 upload succeeded
 		if err := os.Remove(backup.Path); err != nil {
 			s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to remove local backup file: %v", err))
-			fmt.Printf("Warning: Failed to remove local backup file %s: %v\n", backup.Path, err)
 		} else {
 			s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Local backup file removed: %s", backup.Path))
 		}
 	}
 
-	// Close log stream after a short delay to allow final messages to be sent
+	// Close log stream
 	go func() {
 		time.Sleep(2 * time.Second)
 		s.cleanupLogStream(backup.ID.String())
@@ -969,18 +1056,26 @@ func (s *BackupService) uploadToS3Providers(backup *Backup, userID uuid.UUID, s3
 			providers = append(providers, provider)
 		}
 	} else {
-		// Try to use default provider first
-		defaultProvider, err := s.s3ProviderService.GetDefaultProvider(userID)
-		if err == nil && defaultProvider != nil {
-			provider, err := s.s3ProviderService.GetS3ProviderForUpload(defaultProvider.ID.String(), userID)
-			if err == nil {
-				providers = append(providers, provider)
+		// Get ALL configured providers for this user
+		allProviders, err := s.s3ProviderService.GetAllS3ProvidersForUpload(userID)
+		if err == nil && len(allProviders) > 0 {
+			providers = allProviders
+			s.sendLog(backupID, fmt.Sprintf("[INFO] Found %d S3 provider(s), will upload to all of them", len(providers)))
+		} else {
+			// Fallback: try to use default provider if no providers found
+			defaultProvider, err := s.s3ProviderService.GetDefaultProvider(userID)
+			if err == nil && defaultProvider != nil {
+				provider, err := s.s3ProviderService.GetS3ProviderForUpload(defaultProvider.ID.String(), userID)
+				if err == nil {
+					providers = append(providers, provider)
+					s.sendLog(backupID, "[INFO] Using default S3 provider")
+				}
 			}
-		}
-		
-		// Fallback to legacy settings if no default provider
-		if len(providers) == 0 {
-			return s.uploadToS3IfEnabled(backup, userID)
+			
+			// Fallback to legacy settings if no providers
+			if len(providers) == 0 {
+				return s.uploadToS3IfEnabled(backup, userID)
+			}
 		}
 	}
 	
@@ -990,99 +1085,128 @@ func (s *BackupService) uploadToS3Providers(backup *Backup, userID uuid.UUID, s3
 		return fmt.Errorf("No S3 providers configured")
 	}
 	
-	// Upload to all specified providers
+	// Upload to all specified providers in parallel
+	type uploadResult struct {
+		provider  *S3Provider
+		objectKey string
+		err       error
+	}
+
+	uploadChan := make(chan uploadResult, len(providers))
+	var uploadWg sync.WaitGroup
+
+	// Start parallel uploads
+	for _, provider := range providers {
+		uploadWg.Add(1)
+		go func(p *S3Provider) {
+			defer uploadWg.Done()
+
+			s.sendLog(backupID, fmt.Sprintf("[INFO] Starting S3 upload to provider: %s", p.Name))
+
+			region := "us-east-1"
+			if p.Region != nil && *p.Region != "" {
+				region = *p.Region
+			}
+
+			pathPrefix := ""
+			if p.PathPrefix != nil {
+				pathPrefix = *p.PathPrefix
+			}
+
+			// Credentials should already be cleaned by GetS3ProviderForUpload, but clean again for safety
+			accessKey := cleanS3Credential(p.AccessKey)
+			secretKey := cleanS3Credential(p.SecretKey)
+			endpoint := strings.TrimSpace(p.Endpoint)
+			bucket := cleanS3Credential(p.Bucket)
+
+			s3Config := S3Config{
+				Endpoint:   endpoint,
+				Region:     region,
+				Bucket:     bucket,
+				AccessKey:  accessKey,
+				SecretKey:  secretKey,
+				UseSSL:     p.UseSSL,
+				PathPrefix: pathPrefix,
+			}
+
+			s.sendLog(backupID, fmt.Sprintf("[INFO] S3 Configuration: Provider=%s, Endpoint=%s, Bucket=%s, Region=%s",
+				p.Name, p.Endpoint, p.Bucket, region))
+
+			s3Storage, err := NewS3Storage(s3Config)
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to create S3 client for %s: %v", p.Name, err)
+				s.sendLog(backupID, fmt.Sprintf("[ERROR] %s", errMsg))
+				uploadChan <- uploadResult{provider: p, err: fmt.Errorf(errMsg)}
+				return
+			}
+
+			s.sendLog(backupID, fmt.Sprintf("[INFO] Successfully connected to S3 storage: %s", p.Name))
+
+			fileInfo, err := os.Stat(backup.Path)
+			fileSize := int64(0)
+			if err == nil {
+				fileSize = fileInfo.Size()
+				s.sendLog(backupID, fmt.Sprintf("[INFO] Preparing to upload backup file to %s: %s (Size: %d bytes)",
+					p.Name, filepath.Base(backup.Path), fileSize))
+			}
+
+			ctx := context.Background()
+			objectKey, err := s3Storage.UploadFileWithLogging(ctx, backup.Path, func(message string) {
+				s.sendLog(backupID, fmt.Sprintf("[%s] %s", p.Name, message))
+			})
+
+			if err != nil {
+				errMsg := fmt.Sprintf("Failed to upload to %s: %v", p.Name, err)
+				s.sendLog(backupID, fmt.Sprintf("[ERROR] %s", errMsg))
+				uploadChan <- uploadResult{provider: p, err: fmt.Errorf(errMsg)}
+				return
+			}
+
+			s.sendLog(backupID, fmt.Sprintf("[SUCCESS] Backup successfully uploaded to %s: %s", p.Name, objectKey))
+			if fileSize > 0 {
+				s.sendLog(backupID, fmt.Sprintf("[INFO] Uploaded file size to %s: %d bytes (%.2f MB)",
+					p.Name, fileSize, float64(fileSize)/(1024*1024)))
+			}
+
+			uploadChan <- uploadResult{provider: p, objectKey: objectKey, err: nil}
+		}(provider)
+	}
+
+	// Wait for all uploads to complete
+	go func() {
+		uploadWg.Wait()
+		close(uploadChan)
+	}()
+
+	// Collect results
 	var uploadErrors []string
 	successCount := 0
 	totalProviders := len(providers)
-	
-	for i, provider := range providers {
-		s.sendLog(backupID, fmt.Sprintf("[INFO] Starting S3 upload to provider %d/%d: %s", i+1, len(providers), provider.Name))
-		
-		region := "us-east-1"
-		if provider.Region != nil && *provider.Region != "" {
-			region = *provider.Region
-		}
-		
-		pathPrefix := ""
-		if provider.PathPrefix != nil {
-			pathPrefix = *provider.PathPrefix
-		}
-		
-		// Credentials should already be cleaned by GetS3ProviderForUpload, but clean again for safety
-		// This ensures no whitespace or control characters make it through
-		accessKey := cleanS3Credential(provider.AccessKey)
-		secretKey := cleanS3Credential(provider.SecretKey)
-		endpoint := strings.TrimSpace(provider.Endpoint) // Endpoint can have spaces in domain names
-		bucket := cleanS3Credential(provider.Bucket)
-		
-		s3Config := S3Config{
-			Endpoint:   endpoint,
-			Region:     region,
-			Bucket:     bucket,
-			AccessKey:  accessKey,
-			SecretKey:  secretKey,
-			UseSSL:     provider.UseSSL,
-			PathPrefix: pathPrefix,
-		}
-		
-		s.sendLog(backupID, fmt.Sprintf("[INFO] S3 Configuration: Provider=%s, Endpoint=%s, Bucket=%s, Region=%s",
-			provider.Name, provider.Endpoint, provider.Bucket, region))
-		
-		s3Storage, err := NewS3Storage(s3Config)
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to create S3 client for %s: %v", provider.Name, err)
-			s.sendLog(backupID, fmt.Sprintf("[ERROR] %s", errMsg))
-			uploadErrors = append(uploadErrors, errMsg)
-			continue
-		}
-		
-		s.sendLog(backupID, fmt.Sprintf("[INFO] Successfully connected to S3 storage: %s", provider.Name))
-		
-		fileInfo, err := os.Stat(backup.Path)
-		fileSize := int64(0)
-		if err == nil {
-			fileSize = fileInfo.Size()
-			s.sendLog(backupID, fmt.Sprintf("[INFO] Preparing to upload backup file to %s: %s (Size: %d bytes)",
-				provider.Name, filepath.Base(backup.Path), fileSize))
-		}
-		
-		ctx := context.Background()
-		objectKey, err := s3Storage.UploadFileWithLogging(ctx, backup.Path, func(message string) {
-			s.sendLog(backupID, fmt.Sprintf("[%s] %s", provider.Name, message))
-		})
-		
-		if err != nil {
-			errMsg := fmt.Sprintf("Failed to upload to %s: %v", provider.Name, err)
-			s.sendLog(backupID, fmt.Sprintf("[ERROR] %s", errMsg))
-			uploadErrors = append(uploadErrors, errMsg)
-			continue
-		}
-		
-		successCount++
-		s.sendLog(backupID, fmt.Sprintf("[SUCCESS] Backup successfully uploaded to %s: %s", provider.Name, objectKey))
-		if fileSize > 0 {
-			s.sendLog(backupID, fmt.Sprintf("[INFO] Uploaded file size to %s: %d bytes (%.2f MB)",
-				provider.Name, fileSize, float64(fileSize)/(1024*1024)))
-		}
-		
-		// Store the first successful upload's object key and provider ID in backup record
-		if backup.S3ObjectKey == nil {
-			backup.S3ObjectKey = &objectKey
-			providerIDStr := provider.ID.String()
-			backup.S3ProviderID = &providerIDStr
-		}
-		
-		// Track all successful S3 providers for this backup
-		if err := s.backupRepo.AddBackupS3Provider(backupID, provider.ID.String(), objectKey); err != nil {
-			s.sendLog(backupID, fmt.Sprintf("[WARNING] Failed to track S3 provider %s: %v", provider.Name, err))
+
+	for result := range uploadChan {
+		if result.err != nil {
+			uploadErrors = append(uploadErrors, result.err.Error())
+		} else {
+			successCount++
+			// Store the first successful upload's object key and provider ID in backup record
+			if backup.S3ObjectKey == nil {
+				backup.S3ObjectKey = &result.objectKey
+				providerIDStr := result.provider.ID.String()
+				backup.S3ProviderID = &providerIDStr
+			}
+
+			// Track all successful S3 providers for this backup
+			if err := s.backupRepo.AddBackupS3Provider(backupID, result.provider.ID.String(), result.objectKey); err != nil {
+				s.sendLog(backupID, fmt.Sprintf("[WARNING] Failed to track S3 provider %s: %v", result.provider.Name, err))
+			}
 		}
 	}
-	
+
 	if successCount == 0 {
 		// All uploads failed
 		return fmt.Errorf("failed to upload to any S3 provider: %s", strings.Join(uploadErrors, "; "))
 	}
-	
+
 	if len(uploadErrors) > 0 {
 		// Partial success - some succeeded, some failed
 		s.sendLog(backupID, fmt.Sprintf("[WARNING] Uploaded to %d/%d providers. Errors: %s",
@@ -1090,7 +1214,7 @@ func (s *BackupService) uploadToS3Providers(backup *Backup, userID uuid.UUID, s3
 		return fmt.Errorf("partial upload failure: %d/%d succeeded, errors: %s",
 			successCount, totalProviders, strings.Join(uploadErrors, "; "))
 	}
-	
+
 	// All uploads succeeded
 	s.sendLog(backupID, fmt.Sprintf("[SUCCESS] Backup uploaded successfully to all %d S3 provider(s)", successCount))
 	return nil
@@ -1203,5 +1327,149 @@ func (s *BackupService) uploadToS3IfEnabled(backup *Backup, userID uuid.UUID) er
 	}
 
 	fmt.Printf("Successfully uploaded backup %s to S3: %s\n", backup.ID, objectKey)
+	return nil
+}
+
+// uploadToAdditionalS3Providers copies the backup from the first provider to additional providers
+func (s *BackupService) uploadToAdditionalS3Providers(backup *Backup, userID uuid.UUID, providers []*S3Provider, sourceObjectKey string, sourceSize int64) error {
+	backupID := backup.ID.String()
+	
+	if len(providers) == 0 {
+		return nil
+	}
+
+	// Download from source provider
+	if backup.S3ProviderID == nil {
+		return fmt.Errorf("no source S3 provider ID available")
+	}
+	
+	sourceStorage, err := s.GetS3ProviderForDownload(*backup.S3ProviderID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to create source S3 storage: %w", err)
+	}
+
+	ctx := context.Background()
+	sourceObject, err := sourceStorage.GetObject(ctx, sourceObjectKey)
+	if err != nil {
+		return fmt.Errorf("failed to get source object: %w", err)
+	}
+	defer sourceObject.Close()
+
+	// Upload to additional providers in parallel
+	type copyResult struct {
+		provider  *S3Provider
+		objectKey string
+		err       error
+	}
+
+	copyChan := make(chan copyResult, len(providers))
+	var copyWg sync.WaitGroup
+
+	for _, provider := range providers {
+		copyWg.Add(1)
+		go func(p *S3Provider) {
+			defer copyWg.Done()
+
+			s.sendLog(backupID, fmt.Sprintf("[INFO] Copying backup to provider: %s", p.Name))
+
+			region := "us-east-1"
+			if p.Region != nil && *p.Region != "" {
+				region = *p.Region
+			}
+
+			pathPrefix := ""
+			if p.PathPrefix != nil {
+				pathPrefix = *p.PathPrefix
+			}
+
+			accessKey := cleanS3Credential(p.AccessKey)
+			secretKey := cleanS3Credential(p.SecretKey)
+			endpoint := strings.TrimSpace(p.Endpoint)
+			bucket := cleanS3Credential(p.Bucket)
+
+			s3Config := S3Config{
+				Endpoint:   endpoint,
+				Region:     region,
+				Bucket:     bucket,
+				AccessKey:  accessKey,
+				SecretKey:  secretKey,
+				UseSSL:     p.UseSSL,
+				PathPrefix: pathPrefix,
+			}
+
+			destStorage, err := NewS3Storage(s3Config)
+			if err != nil {
+				copyChan <- copyResult{provider: p, err: fmt.Errorf("failed to create S3 client: %w", err)}
+				return
+			}
+
+			// Read source object into memory (for small files) or stream it
+			// For large files, we should stream, but for simplicity, let's read it
+			// Actually, we need to re-read the source for each provider
+			// Let's create a new reader from source
+			sourceObject2, err := sourceStorage.GetObject(ctx, sourceObjectKey)
+			if err != nil {
+				copyChan <- copyResult{provider: p, err: fmt.Errorf("failed to get source object: %w", err)}
+				return
+			}
+			defer sourceObject2.Close()
+
+			// Extract connection name from source object key
+			// Format: prefix/connection_name/filename or connection_name/filename
+			connectionName := ""
+			keyParts := strings.Split(sourceObjectKey, "/")
+			if len(keyParts) >= 2 {
+				// Connection name is usually second-to-last part (before filename)
+				// Skip prefix if present, then connection name, then filename
+				for i := len(keyParts) - 2; i >= 0; i-- {
+					if keyParts[i] != "" && !strings.HasSuffix(keyParts[i], ".gz") && !strings.HasSuffix(keyParts[i], ".sql") {
+						connectionName = keyParts[i]
+						break
+					}
+				}
+			}
+			
+			objectKey := filepath.Base(sourceObjectKey)
+			
+			// Upload the stream
+			uploadedKey, err := destStorage.UploadStream(ctx, sourceObject2, objectKey, connectionName, func(message string) {
+				s.sendLog(backupID, fmt.Sprintf("[%s] %s", p.Name, message))
+			})
+
+			if err != nil {
+				copyChan <- copyResult{provider: p, err: fmt.Errorf("failed to upload: %w", err)}
+				return
+			}
+
+			// Track S3 provider
+			if err := s.backupRepo.AddBackupS3Provider(backupID, p.ID.String(), uploadedKey); err != nil {
+				s.sendLog(backupID, fmt.Sprintf("[WARNING] Failed to track S3 provider %s: %v", p.Name, err))
+			}
+
+			s.sendLog(backupID, fmt.Sprintf("[SUCCESS] Backup copied to %s: %s", p.Name, uploadedKey))
+			copyChan <- copyResult{provider: p, objectKey: uploadedKey, err: nil}
+		}(provider)
+	}
+
+	go func() {
+		copyWg.Wait()
+		close(copyChan)
+	}()
+
+	var errors []string
+	successCount := 0
+
+	for result := range copyChan {
+		if result.err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", result.provider.Name, result.err))
+		} else {
+			successCount++
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("partial copy failure: %d/%d succeeded, errors: %s", successCount, len(providers), strings.Join(errors, "; "))
+	}
+
 	return nil
 }

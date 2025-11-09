@@ -6,8 +6,11 @@ export interface UserSettings {
   notify_dashboard: boolean;
   notify_email: boolean;
   notify_webhook: boolean;
+  notify_telegram: boolean;
   webhook_url?: string;
   email?: string;
+  telegram_bot_token?: string;
+  telegram_chat_id?: string;
   smtp_host?: string;
   smtp_port?: number;
   smtp_username?: string;

@@ -242,3 +242,28 @@ func (s *S3ProviderService) GetS3ProviderForDownload(id string, userID uuid.UUID
 	return s.GetS3ProviderForUpload(id, userID)
 }
 
+// GetAllS3ProvidersForUpload returns all providers for a user with decrypted credentials for upload
+func (s *S3ProviderService) GetAllS3ProvidersForUpload(userID uuid.UUID) ([]*S3Provider, error) {
+	providers, err := s.repo.ListS3Providers(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decrypt and clean credentials for each provider
+	for _, provider := range providers {
+		// Decrypt secret key
+		decryptedSecretKey, err := s.cryptoService.Decrypt(provider.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt secret key for provider %s: %w", provider.ID, err)
+		}
+		
+		// Clean all credentials
+		provider.AccessKey = cleanS3Credential(provider.AccessKey)
+		provider.SecretKey = cleanS3Credential(decryptedSecretKey)
+		provider.Endpoint = strings.TrimSpace(provider.Endpoint)
+		provider.Bucket = cleanS3Credential(provider.Bucket)
+	}
+
+	return providers, nil
+}
+

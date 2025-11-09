@@ -136,6 +136,8 @@ func main() {
 	protected.HandleFunc("/settings", settingsHandler.GetSettings).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/settings", settingsHandler.UpdateSettings).Methods("PUT", "OPTIONS")
 	protected.HandleFunc("/settings/test-s3", settingsHandler.TestS3Connection).Methods("POST", "OPTIONS")
+	protected.HandleFunc("/settings/test-telegram", settingsHandler.TestTelegramConnection).Methods("POST", "OPTIONS")
+	protected.HandleFunc("/settings/telegram-chats", settingsHandler.GetTelegramChats).Methods("GET", "OPTIONS")
 
 	s3ProviderHandler := backup.NewS3ProviderHandler(s3ProviderService)
 	protected.HandleFunc("/s3-providers", s3ProviderHandler.ListS3Providers).Methods("GET", "OPTIONS")

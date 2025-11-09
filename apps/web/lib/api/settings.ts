@@ -28,3 +28,37 @@ export async function testS3Connection(params: TestS3ConnectionRequest): Promise
     body: JSON.stringify(params),
   });
 }
+
+export interface TestTelegramConnectionRequest {
+  telegram_bot_token: string;
+  telegram_chat_id: string;
+}
+
+export interface TelegramChatInfo {
+  id: string;
+  type: string;
+  title?: string;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+}
+
+export interface TelegramChat {
+  id: string;
+  type: string;
+  title?: string;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+}
+
+export async function testTelegramConnection(params: TestTelegramConnectionRequest): Promise<{ data: TelegramChatInfo }> {
+  return apiRequest<{ data: TelegramChatInfo }>('/api/settings/test-telegram', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function getTelegramChats(botToken: string): Promise<{ data: TelegramChat[] }> {
+  return apiRequest<{ data: TelegramChat[] }>(`/api/settings/telegram-chats?bot_token=${encodeURIComponent(botToken)}`);
+}

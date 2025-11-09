@@ -1,7 +1,9 @@
 package backup
 
 import (
+	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,19 +70,18 @@ func (s *BackupService) createPgDumpCmd(conn *connection.StoredConnection, outpu
 
 	binPath := filepath.Join(binaryPath, common.GetPlatformExecutableName(requiredTools["postgresql"]))
 
-	// Base arguments for pg_dump
+	// Use custom format (-F c) for better compression and faster restores
+	// Custom format is compressed internally and allows parallel restore
 	args := []string{
 		"-h", conn.Host,
 		"-p", fmt.Sprintf("%d", conn.Port),
 		"-U", conn.Username,
 		"-d", conn.DatabaseName,
-		"-F", "p", // Plain text format (SQL script)
+		"-F", "c", // Custom format (compressed internally, faster restores)
 		"-f", outputPath,
 		"--no-owner",      // Don't dump ownership commands (helps with TimescaleDB and cross-database restores)
 		"--no-privileges", // Don't dump access privileges (helps with TimescaleDB and cross-database restores)
 		"--verbose",       // Verbose output shows progress: what tables/schemas are being dumped
-		// Note: --progress flag is only available for directory format (-F d), not plain format
-		// For plain format, we rely on --verbose output and file size monitoring
 	}
 
 	// Check if TimescaleDB is installed and log appropriate message
@@ -94,6 +95,60 @@ func (s *BackupService) createPgDumpCmd(conn *connection.StoredConnection, outpu
 	cmd := exec.Command(binPath, args...)
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", conn.Password))
 	return cmd
+}
+
+// createPgDumpCmdForStreaming creates a pg_dump command that outputs to stdout
+// Uses plain format (-F p) since custom format doesn't support stdout
+func (s *BackupService) createPgDumpCmdForStreaming(conn *connection.StoredConnection) *exec.Cmd {
+	binaryPath := s.findDatabaseBinaryPath("postgresql")
+	if binaryPath == "" {
+		fmt.Printf("ERROR: pg_dump binary not found. Please install PostgreSQL client tools.\n")
+		return nil
+	}
+
+	binPath := filepath.Join(binaryPath, common.GetPlatformExecutableName(requiredTools["postgresql"]))
+
+	// Use plain format (-F p) for stdout streaming
+	// We'll compress it on-the-fly during upload
+	args := []string{
+		"-h", conn.Host,
+		"-p", fmt.Sprintf("%d", conn.Port),
+		"-U", conn.Username,
+		"-d", conn.DatabaseName,
+		"-F", "p", // Plain format (SQL script) - supports stdout
+		"--no-owner",      // Don't dump ownership commands
+		"--no-privileges", // Don't dump access privileges
+		"--verbose",       // Verbose output shows progress
+	}
+
+	cmd := exec.Command(binPath, args...)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", conn.Password))
+	return cmd
+}
+
+// compressBackup compresses a backup file using gzip
+func (s *BackupService) compressBackup(inputPath, outputPath string) error {
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return fmt.Errorf("failed to open input file: %w", err)
+	}
+	defer inputFile.Close()
+
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer outputFile.Close()
+
+	gzipWriter := gzip.NewWriter(outputFile)
+	defer gzipWriter.Close()
+
+	_, err = io.Copy(gzipWriter, inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to compress file: %w", err)
+	}
+
+	return nil
 }
 
 // isTimescaleDBInstalled checks if TimescaleDB extension is installed in the database
@@ -190,15 +245,41 @@ func (s *BackupService) createMySQLDumpCmd(conn *connection.StoredConnection, ou
 	}
 
 	binPath := filepath.Join(binaryPath, common.GetPlatformExecutableName(requiredTools[conn.Type]))
-	cmd := exec.Command(binPath,
+	
+	// Enhanced mysqldump options for efficiency
+	args := []string{
 		"-h", conn.Host,
 		"-P", fmt.Sprintf("%d", conn.Port),
 		"-u", conn.Username,
 		fmt.Sprintf("-p%s", conn.Password),
+		"--single-transaction", // Consistent backup for InnoDB
+		"--quick",              // Retrieve rows one at a time (reduces memory usage)
+		"--lock-tables=false",  // Don't lock all tables (works with --single-transaction)
+		"--routines",           // Include stored procedures and functions
+		"--triggers",           // Include triggers
+		"--events",             // Include events
 		conn.DatabaseName,
-		"-r", outputPath,
-	)
+	}
+	
+	// If output path is empty or "-", output to stdout for streaming (no -r flag)
+	// Otherwise, write to file
+	if outputPath != "" && outputPath != "-" {
+		if strings.HasSuffix(outputPath, ".gz") {
+			// Remove .gz extension for mysqldump output, we'll compress it
+			args = append(args, "-r", strings.TrimSuffix(outputPath, ".gz"))
+		} else {
+			args = append(args, "-r", outputPath)
+		}
+	}
+	// If outputPath is "" or "-", mysqldump will output to stdout by default
+	
+	cmd := exec.Command(binPath, args...)
 	return cmd
+}
+
+// createMySQLDumpCmdForStreaming creates a mysqldump command that outputs to stdout
+func (s *BackupService) createMySQLDumpCmdForStreaming(conn *connection.StoredConnection) *exec.Cmd {
+	return s.createMySQLDumpCmd(conn, "-") // "-" means stdout
 }
 
 func (s *BackupService) createMongoDumpCmd(conn *connection.StoredConnection, outputPath string) *exec.Cmd {

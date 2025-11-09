@@ -12,8 +12,11 @@ type UserSettings struct {
 	NotifyDashboard bool      `json:"notify_dashboard"`
 	NotifyEmail     bool      `json:"notify_email"`
 	NotifyWebhook   bool      `json:"notify_webhook"`
+	NotifyTelegram  bool      `json:"notify_telegram"`
 	WebhookURL      *string   `json:"webhook_url,omitempty"`
 	Email           *string   `json:"email,omitempty"`
+	TelegramBotToken *string `json:"telegram_bot_token,omitempty"`
+	TelegramChatID  *string  `json:"telegram_chat_id,omitempty"`
 	SMTPHost        *string   `json:"smtp_host,omitempty"`
 	SMTPPort        *int      `json:"smtp_port,omitempty"`
 	SMTPUsername    *string   `json:"smtp_username,omitempty"`
@@ -36,8 +39,11 @@ type UpdateSettingsRequest struct {
 	NotifyDashboard *bool   `json:"notify_dashboard,omitempty"`
 	NotifyEmail     *bool   `json:"notify_email,omitempty"`
 	NotifyWebhook   *bool   `json:"notify_webhook,omitempty"`
+	NotifyTelegram  *bool   `json:"notify_telegram,omitempty"`
 	WebhookURL      *string `json:"webhook_url,omitempty"`
 	Email           *string `json:"email,omitempty"`
+	TelegramBotToken *string `json:"telegram_bot_token,omitempty"`
+	TelegramChatID  *string  `json:"telegram_chat_id,omitempty"`
 	SMTPHost        *string `json:"smtp_host,omitempty"`
 	SMTPPort        *int    `json:"smtp_port,omitempty"`
 	SMTPUsername    *string `json:"smtp_username,omitempty"`
@@ -61,4 +67,9 @@ type TestS3ConnectionRequest struct {
 	SecretKey  string `json:"s3_secret_key"`
 	UseSSL     bool   `json:"s3_use_ssl"`
 	PathPrefix string `json:"s3_path_prefix"`
+}
+
+type TestTelegramConnectionRequest struct {
+	BotToken string `json:"telegram_bot_token"`
+	ChatID   string `json:"telegram_chat_id"`
 }
