@@ -33,16 +33,17 @@ export function useBackup() {
   });
 
   const { mutate: createBackup, isPending: isCreating } = useMutation({
-    mutationFn: async (connectionId: string) => {
-      await saveBackup(connectionId);
+    mutationFn: async ({ connectionId, s3ProviderIds }: { connectionId: string; s3ProviderIds?: string[] }) => {
+      return await saveBackup(connectionId, s3ProviderIds);
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['backups']});
       queryClient.invalidateQueries({ queryKey: ['connections']});
       toast({
         title: "Success",
         description: "Backup started successfully",
       });
+      return data;
     },
     onError: (error) => {
       toast({
@@ -121,8 +122,8 @@ export function useBackup() {
   });
 
   const { mutate: downloadBackupFile, isPending: isDownloading } = useMutation({
-    mutationFn: async (backup: { id: string, path: string }) => {
-      const blob = await downloadBackup(backup.id);
+    mutationFn: async (backup: { id: string, path: string, providerId?: string }) => {
+      const blob = await downloadBackup(backup.id, backup.providerId);
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

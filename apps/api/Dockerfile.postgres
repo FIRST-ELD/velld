@@ -13,10 +13,12 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o main cmd/api-server/main.go
 
 FROM alpine:latest
 
-# Install only PostgreSQL client tools
-RUN apk add --no-cache \
-    sqlite-libs \
-    postgresql-client
+# Install PostgreSQL 16 client tools
+# Try to install postgresql16-client, fallback to default postgresql-client
+RUN apk add --no-cache sqlite-libs && \
+    (apk add --no-cache --repository=http://dl-cdn.alpinelinux.org/alpine/v3.19/main postgresql16-client 2>/dev/null || \
+     apk add --no-cache --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main postgresql16-client 2>/dev/null || \
+     apk add --no-cache postgresql-client)
 
 WORKDIR /app
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dendianugerah/velld/internal/common"
@@ -11,7 +12,8 @@ import (
 )
 
 type BackupRepository struct {
-	db *sql.DB
+	db            *sql.DB
+	appendLogMutex sync.Mutex // Protects concurrent log appends
 }
 
 func NewBackupRepository(db *sql.DB) *BackupRepository {
@@ -211,11 +213,11 @@ func (r *BackupRepository) GetAllActiveSchedules() ([]*BackupSchedule, error) {
 func (r *BackupRepository) CreateBackup(backup *Backup) error {
 	_, err := r.db.Exec(`
 		INSERT INTO backups (
-			id, connection_id, schedule_id, status, path, s3_object_key, size,
+			id, connection_id, schedule_id, status, path, s3_object_key, s3_provider_id, size, logs,
 			started_time, completed_time, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		backup.ID, backup.ConnectionID, backup.ScheduleID,
-		backup.Status, backup.Path, backup.S3ObjectKey, backup.Size,
+		backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.Logs,
 		backup.StartedTime, backup.CompletedTime,
 		backup.CreatedAt, backup.UpdatedAt)
 	return err
@@ -224,6 +226,31 @@ func (r *BackupRepository) CreateBackup(backup *Backup) error {
 func (r *BackupRepository) UpdateBackupStatus(id string, status string) error {
 	_, err := r.db.Exec("UPDATE backups SET status = $1, updated_at = $2 WHERE id = $3",
 		status, time.Now().Format(time.RFC3339), id)
+	return err
+}
+
+func (r *BackupRepository) UpdateBackup(backup *Backup) error {
+	var completedTimeStr *string
+	if backup.CompletedTime != nil {
+		str := backup.CompletedTime.Format(time.RFC3339)
+		completedTimeStr = &str
+	}
+
+	_, err := r.db.Exec(`
+		UPDATE backups SET
+			status = $1,
+			path = $2,
+			s3_object_key = $3,
+			s3_provider_id = $4,
+			size = $5,
+			logs = $6,
+			started_time = $7,
+			completed_time = $8,
+			updated_at = $9
+		WHERE id = $10`,
+		backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.Logs,
+		backup.StartedTime.Format(time.RFC3339), completedTimeStr,
+		time.Now().Format(time.RFC3339), backup.ID)
 	return err
 }
 
@@ -270,13 +297,15 @@ func (r *BackupRepository) GetBackup(id string) (*Backup, error) {
 		createdAtStr     string
 		updatedAtStr     string
 	)
+	var logsStr sql.NullString
+	var s3ProviderIDStr sql.NullString
 	backup := &Backup{}
 	err := r.db.QueryRow(`
-		SELECT id, connection_id, schedule_id, status, path, s3_object_key, size,
+		SELECT id, connection_id, schedule_id, status, path, s3_object_key, s3_provider_id, size, logs,
 			   started_time, completed_time, created_at, updated_at 
 		FROM backups WHERE id = $1`, id).
 		Scan(&backup.ID, &backup.ConnectionID, &backup.ScheduleID,
-			&backup.Status, &backup.Path, &backup.S3ObjectKey, &backup.Size,
+			&backup.Status, &backup.Path, &backup.S3ObjectKey, &s3ProviderIDStr, &backup.Size, &logsStr,
 			&startedTimeStr, &completedTimeStr,
 			&createdAtStr, &updatedAtStr)
 	if err != nil {
@@ -311,6 +340,16 @@ func (r *BackupRepository) GetBackup(id string) (*Backup, error) {
 		return nil, fmt.Errorf("error parsing updated_at: %v", err)
 	}
 	backup.UpdatedAt = updatedAt
+
+	// Parse logs if not null
+	if logsStr.Valid {
+		backup.Logs = &logsStr.String
+	}
+
+	// Parse s3_provider_id if not null
+	if s3ProviderIDStr.Valid {
+		backup.S3ProviderID = &s3ProviderIDStr.String
+	}
 
 	return backup, nil
 }
@@ -387,6 +426,55 @@ func (r *BackupRepository) GetAllBackupsWithPagination(opts BackupListOptions) (
 	return backups, total, rows.Err()
 }
 
+func (r *BackupRepository) GetActiveBackups(userID uuid.UUID) ([]*BackupList, error) {
+	query := `
+		SELECT 
+			b.id, b.connection_id, c.type, b.schedule_id, b.status, b.path, b.s3_object_key, b.size,
+			b.started_time, b.completed_time, b.created_at, b.updated_at,
+			c.database_name
+		FROM backups b
+		INNER JOIN connections c ON b.connection_id = c.id
+		WHERE c.user_id = $1 AND b.status = 'in_progress'
+		ORDER BY b.started_time DESC
+	`
+
+	rows, err := r.db.Query(query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	backups := make([]*BackupList, 0)
+	for rows.Next() {
+		var (
+			startedTimeStr   sql.NullString
+			completedTimeStr sql.NullString
+			createdAtStr     string
+			updatedAtStr     string
+		)
+		backup := &BackupList{}
+		err := rows.Scan(
+			&backup.ID, &backup.ConnectionID, &backup.DatabaseType,
+			&backup.ScheduleID, &backup.Status, &backup.Path, &backup.S3ObjectKey, &backup.Size,
+			&startedTimeStr, &completedTimeStr,
+			&createdAtStr, &updatedAtStr,
+			&backup.DatabaseName,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		backup.StartedTime = startedTimeStr.String
+		backup.CompletedTime = completedTimeStr.String
+		backup.CreatedAt = createdAtStr
+		backup.UpdatedAt = updatedAtStr
+
+		backups = append(backups, backup)
+	}
+
+	return backups, rows.Err()
+}
+
 func (r *BackupRepository) UpdateBackupStatusAndSchedule(id string, status string, scheduleID string) error {
 	_, err := r.db.Exec(`
 		UPDATE backups 
@@ -394,6 +482,91 @@ func (r *BackupRepository) UpdateBackupStatusAndSchedule(id string, status strin
 		WHERE id = $4`,
 		status, scheduleID, time.Now().Format(time.RFC3339), id)
 	return err
+}
+
+// AppendLog appends a log line to the backup's logs
+// Uses mutex to prevent SQLite "database is locked" errors from concurrent writes
+// Implements retry logic with exponential backoff for transient lock errors
+func (r *BackupRepository) AppendLog(backupID string, logLine string) error {
+	r.appendLogMutex.Lock()
+	defer r.appendLogMutex.Unlock()
+
+	maxRetries := 5
+	baseDelay := 10 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Use a transaction to read, append, and write back
+		tx, err := r.db.Begin()
+		if err != nil {
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				// Exponential backoff: 10ms, 20ms, 40ms, 80ms, 160ms
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		var currentLogs sql.NullString
+		err = tx.QueryRow(`SELECT logs FROM backups WHERE id = $1`, backupID).Scan(&currentLogs)
+		if err != nil {
+			tx.Rollback()
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		var newLogs string
+		if currentLogs.Valid && currentLogs.String != "" {
+			newLogs = currentLogs.String + "\n" + logLine
+		} else {
+			newLogs = logLine
+		}
+
+		_, err = tx.Exec(`UPDATE backups SET logs = $1, updated_at = $2 WHERE id = $3`,
+			newLogs, time.Now().Format(time.RFC3339), backupID)
+		if err != nil {
+			tx.Rollback()
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			if attempt < maxRetries-1 && (err.Error() == "database is locked" || err.Error() == "database is locked (5)") {
+				delay := baseDelay * time.Duration(1<<uint(attempt))
+				time.Sleep(delay)
+				continue
+			}
+			return err
+		}
+
+		// Success
+		return nil
+	}
+
+	return fmt.Errorf("failed to append log after %d retries", maxRetries)
+}
+
+// GetBackupLogs retrieves the logs for a backup
+func (r *BackupRepository) GetBackupLogs(backupID string) (string, error) {
+	var logs sql.NullString
+	err := r.db.QueryRow(`SELECT logs FROM backups WHERE id = $1`, backupID).Scan(&logs)
+	if err != nil {
+		return "", err
+	}
+
+	if logs.Valid {
+		return logs.String, nil
+	}
+	return "", nil
 }
 
 func (r *BackupRepository) GetBackupStats(userID uuid.UUID) (*BackupStats, error) {
@@ -471,4 +644,92 @@ func (r *BackupRepository) GetBackupStats(userID uuid.UUID) (*BackupStats, error
 	}
 
 	return stats, nil
+}
+
+// AddBackupS3Provider adds an S3 provider record for a backup
+func (r *BackupRepository) AddBackupS3Provider(backupID, providerID, objectKey string) error {
+	id := uuid.New().String()
+	_, err := r.db.Exec(`
+		INSERT INTO backup_s3_providers (id, backup_id, s3_provider_id, s3_object_key, created_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT(backup_id, s3_provider_id) DO UPDATE SET s3_object_key = $3, created_at = $5`,
+		id, backupID, providerID, objectKey, time.Now().Format(time.RFC3339))
+	return err
+}
+
+// BackupS3Provider represents an S3 provider for a backup
+type BackupS3Provider struct {
+	ProviderID string `json:"provider_id"`
+	ObjectKey  string `json:"object_key"`
+}
+
+// GetBackupS3Providers returns all S3 providers for a backup
+func (r *BackupRepository) GetBackupS3Providers(backupID string) ([]BackupS3Provider, error) {
+	rows, err := r.db.Query(`
+		SELECT s3_provider_id, s3_object_key
+		FROM backup_s3_providers
+		WHERE backup_id = $1
+		ORDER BY created_at ASC`,
+		backupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var providers []BackupS3Provider
+
+	for rows.Next() {
+		var providerID, objectKey string
+		if err := rows.Scan(&providerID, &objectKey); err != nil {
+			return nil, err
+		}
+		providers = append(providers, BackupS3Provider{
+			ProviderID: providerID,
+			ObjectKey:  objectKey,
+		})
+	}
+
+	return providers, rows.Err()
+}
+
+// CreateShareableLink creates a shareable download link for a backup
+func (r *BackupRepository) CreateShareableLink(backupID, providerID, token string, expiresAt time.Time) error {
+	id := uuid.New().String()
+	_, err := r.db.Exec(`
+		INSERT INTO shareable_links (id, backup_id, s3_provider_id, token, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		id, backupID, providerID, token, expiresAt.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	return err
+}
+
+// GetShareableLink retrieves a shareable link by token
+func (r *BackupRepository) GetShareableLink(token string) (backupID, providerID string, err error) {
+	var expiresAtStr string
+	err = r.db.QueryRow(`
+		SELECT backup_id, s3_provider_id, expires_at
+		FROM shareable_links
+		WHERE token = $1`,
+		token).Scan(&backupID, &providerID, &expiresAtStr)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Check if expired
+	expiresAt, err := common.ParseTime(expiresAtStr)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid expiration time: %v", err)
+	}
+
+	if time.Now().After(expiresAt) {
+		return "", "", fmt.Errorf("link has expired")
+	}
+
+	// Update access count
+	_, err = r.db.Exec(`
+		UPDATE shareable_links
+		SET access_count = access_count + 1
+		WHERE token = $1`,
+		token)
+
+	return backupID, providerID, err
 }

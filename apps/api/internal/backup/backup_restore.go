@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,8 +31,29 @@ func (s *BackupService) RestoreBackup(backupID string, connectionID string) erro
 		return fmt.Errorf("failed to get backup: %v", err)
 	}
 
+	// Check if local file exists, if not try to download from S3
 	if _, err := os.Stat(backup.Path); os.IsNotExist(err) {
-		return fmt.Errorf("backup file not found: %s", backup.Path)
+		if backup.S3ObjectKey != nil && backup.S3ProviderID != nil {
+			// Get connection to find user ID
+			conn, err := s.connStorage.GetConnection(connectionID)
+			if err != nil {
+				return fmt.Errorf("failed to get connection: %v", err)
+			}
+
+			// Get S3 storage for download
+			s3Storage, err := s.GetS3ProviderForDownload(*backup.S3ProviderID, conn.UserID)
+			if err != nil {
+				return fmt.Errorf("failed to get S3 provider: %v", err)
+			}
+
+			// Download from S3 to local path
+			ctx := context.Background()
+			if err := s3Storage.DownloadFile(ctx, *backup.S3ObjectKey, backup.Path); err != nil {
+				return fmt.Errorf("failed to download backup from S3: %v", err)
+			}
+		} else {
+			return fmt.Errorf("backup file not found: %s", backup.Path)
+		}
 	}
 
 	conn, err := s.connStorage.GetConnection(connectionID)

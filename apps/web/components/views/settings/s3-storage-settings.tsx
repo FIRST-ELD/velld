@@ -9,13 +9,14 @@ import { Switch } from "@/components/ui/switch";
 import { Loader2, Cloud, Check, AlertCircle, HelpCircle } from "lucide-react";
 import { useSettings } from "@/hooks/use-settings";
 import { useToast } from "@/hooks/use-toast";
+import { testS3Connection } from "@/lib/api/settings";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const S3_PROVIDERS = [
   { value: "aws", label: "AWS S3", endpoint: "s3.amazonaws.com", region: "us-east-1", ssl: true },
   { value: "minio", label: "MinIO", endpoint: "localhost:9000", region: "us-east-1", ssl: false },
-  { value: "backblaze", label: "Backblaze B2", endpoint: "s3.us-west-002.backblazeb2.com", region: "us-west-002", ssl: true },
+  { value: "backblaze", label: "Backblaze B2", endpoint: "s3.us-east-005.backblazeb2.com", region: "us-east-005", ssl: true },
   { value: "scaleway", label: "Scaleway", endpoint: "s3.fr-par.scw.cloud", region: "fr-par", ssl: true },
   { value: "storj", label: "Storj DCS", endpoint: "gateway.storjshare.io", region: "global", ssl: true },
   { value: "digitalocean", label: "DigitalOcean Spaces", endpoint: "nyc3.digitaloceanspaces.com", region: "nyc3", ssl: true },
@@ -73,15 +74,20 @@ export function S3StorageSettings() {
     setTestResult(null);
 
     try {
-      // TODO: Implement test S3 connection endpoint
-      // const response = await fetch('/api/settings/test-s3', {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json' },
-      //   body: JSON.stringify(formData),
-      // });
-      
-      // Simulate test for now
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Validate required fields
+      if (!formData.s3_endpoint || !formData.s3_bucket || !formData.s3_access_key || !formData.s3_secret_key) {
+        throw new Error("Please fill in all required S3 fields (Endpoint, Bucket, Access Key, Secret Key)");
+      }
+
+      await testS3Connection({
+        s3_endpoint: formData.s3_endpoint,
+        s3_region: formData.s3_region,
+        s3_bucket: formData.s3_bucket,
+        s3_access_key: formData.s3_access_key,
+        s3_secret_key: formData.s3_secret_key,
+        s3_use_ssl: formData.s3_use_ssl,
+        s3_path_prefix: formData.s3_path_prefix,
+      });
       
       setTestResult("success");
       toast({
@@ -90,10 +96,11 @@ export function S3StorageSettings() {
       });
     } catch (error) {
       setTestResult("error");
+      const errorMessage = error instanceof Error ? error.message : "Failed to connect to S3 storage";
       toast({
         variant: "destructive",
         title: "Connection Failed",
-        description: error instanceof Error ? error.message : "Failed to connect to S3 storage",
+        description: errorMessage,
       });
     } finally {
       setIsTesting(false);
@@ -384,8 +391,7 @@ export function S3StorageSettings() {
               <Button
                 onClick={handleTestConnection}
                 variant="outline"
-                // disabled={isTesting || !formData.s3_endpoint || !formData.s3_bucket}
-                disabled={true}
+                disabled={isTesting || !formData.s3_endpoint || !formData.s3_bucket || !formData.s3_access_key || !formData.s3_secret_key}
               >
                 {isTesting ? (
                   <>

@@ -53,3 +53,19 @@ func (h *SettingsHandler) UpdateSettings(w http.ResponseWriter, r *http.Request)
 
 	response.SendSuccess(w, "Settings updated successfully", settings)
 }
+
+func (h *SettingsHandler) TestS3Connection(w http.ResponseWriter, r *http.Request) {
+	var req TestS3ConnectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.SendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	err := h.service.TestS3Connection(&req)
+	if err != nil {
+		response.SendError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	response.SendSuccess(w, "S3 connection test successful", nil)
+}

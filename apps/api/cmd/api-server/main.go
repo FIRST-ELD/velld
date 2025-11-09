@@ -97,6 +97,9 @@ func main() {
 	notificationRepo := notification.NewNotificationRepository(db)
 	settingsService := settings.NewSettingsService(settingsRepo, cryptoService)
 
+	s3ProviderRepo := backup.NewS3ProviderRepository(db)
+	s3ProviderService := backup.NewS3ProviderService(s3ProviderRepo, cryptoService)
+
 	backupService := backup.NewBackupService(
 		connRepo,
 		"./backups",
@@ -104,17 +107,26 @@ func main() {
 		settingsService,
 		notificationRepo,
 		cryptoService,
+		s3ProviderService,
 	)
 
 	backupHandler := backup.NewBackupHandler(backupService)
 
 	protected.HandleFunc("/backups/stats", backupHandler.GetBackupStats).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/backups/active", backupHandler.GetActiveBackups).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/schedule", backupHandler.ScheduleBackup).Methods("POST", "OPTIONS")
 	protected.HandleFunc("/backups", backupHandler.CreateBackup).Methods("POST", "OPTIONS")
 	protected.HandleFunc("/backups", backupHandler.ListBackups).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/{id}", backupHandler.GetBackup).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/{id}/download", backupHandler.DownloadBackup).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/backups/{id}/s3-providers", backupHandler.GetBackupS3Providers).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/backups/{id}/share", backupHandler.CreateShareableLink).Methods("POST", "OPTIONS")
+	protected.HandleFunc("/backups/{id}/logs", backupHandler.StreamBackupLogs).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/backups/{id}/logs/stored", backupHandler.GetBackupLogs).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/restore", backupHandler.RestoreBackup).Methods("POST", "OPTIONS")
+	
+	// Public route for shareable links (no auth required)
+	r.HandleFunc("/api/backups/share/{token}", backupHandler.DownloadViaShareableLink).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/compare/{sourceId}/{targetId}", backupHandler.CompareBackups).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/{connection_id}/schedule/disable", backupHandler.DisableBackupSchedule).Methods("POST", "OPTIONS")
 	protected.HandleFunc("/backups/{connection_id}/schedule", backupHandler.UpdateBackupSchedule).Methods("PUT", "OPTIONS")
@@ -123,6 +135,16 @@ func main() {
 
 	protected.HandleFunc("/settings", settingsHandler.GetSettings).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/settings", settingsHandler.UpdateSettings).Methods("PUT", "OPTIONS")
+	protected.HandleFunc("/settings/test-s3", settingsHandler.TestS3Connection).Methods("POST", "OPTIONS")
+
+	s3ProviderHandler := backup.NewS3ProviderHandler(s3ProviderService)
+	protected.HandleFunc("/s3-providers", s3ProviderHandler.ListS3Providers).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/s3-providers", s3ProviderHandler.CreateS3Provider).Methods("POST", "OPTIONS")
+	protected.HandleFunc("/s3-providers/{id}", s3ProviderHandler.GetS3Provider).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/s3-providers/{id}", s3ProviderHandler.UpdateS3Provider).Methods("PUT", "OPTIONS")
+	protected.HandleFunc("/s3-providers/{id}", s3ProviderHandler.DeleteS3Provider).Methods("DELETE", "OPTIONS")
+	protected.HandleFunc("/s3-providers/{id}/set-default", s3ProviderHandler.SetDefaultProvider).Methods("POST", "OPTIONS")
+	protected.HandleFunc("/s3-providers/{id}/test", s3ProviderHandler.TestS3Provider).Methods("POST", "OPTIONS")
 
 	notificationService := notification.NewNotificationService(notificationRepo)
 	notificationHandler := notification.NewNotificationHandler(notificationService)

@@ -14,6 +14,19 @@ export const logout = () => {
   window.location.href = "/login";
 };
 
+// Format backup status for display
+export function formatBackupStatus(status: string): string {
+  const statusMap: Record<string, string> = {
+    'success': 'Success',
+    'completed': 'Completed',
+    'completed_with_errors': 'Completed With Errors',
+    'failed': 'Failed',
+    'in_progress': 'In Progress',
+    'pending': 'Pending',
+  };
+  return statusMap[status.toLowerCase()] || status;
+}
+
 export function formatSize(bytes: number): string {
   if (bytes === 0) return "0 Bytes";
   const k = 1024;

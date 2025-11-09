@@ -25,6 +25,7 @@ import type { Connection } from '@/types/connection';
 import { typeLabels } from '@/types/base';
 import { useBackup } from '@/hooks/use-backup';
 import { useState } from 'react';
+import { BackupJobViewer } from '@/components/views/backup/backup-job-viewer';
 
 interface ConnectionsTableProps {
   connections: Connection[];
@@ -45,6 +46,17 @@ export function ConnectionsTable({
   const { createBackup, isCreating } = useBackup();
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
+  const [viewingBackupId, setViewingBackupId] = useState<string | null>(null);
+
+  const handleCreateBackup = (connectionId: string, s3ProviderIds?: string[]) => {
+    createBackup({ connectionId, s3ProviderIds }, {
+      onSuccess: (data) => {
+        if (data?.id) {
+          setViewingBackupId(data.id);
+        }
+      },
+    });
+  };
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -211,7 +223,7 @@ export function ConnectionsTable({
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => createBackup(connection.id)}
+                                onClick={() => handleCreateBackup(connection.id)}
                                 disabled={isCreating}
                                 className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
                               >
@@ -280,6 +292,13 @@ export function ConnectionsTable({
           </Table>
         </div>
       </TooltipProvider>
+      {viewingBackupId && (
+        <BackupJobViewer
+          backupId={viewingBackupId}
+          open={!!viewingBackupId}
+          onOpenChange={(open) => !open && setViewingBackupId(null)}
+        />
+      )}
     </div>
   );
 }

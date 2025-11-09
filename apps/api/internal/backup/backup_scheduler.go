@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -91,7 +92,7 @@ func (s *BackupService) executeCronBackup(schedule *BackupSchedule) {
 	// 	return
 	// }
 
-	backup, err := s.CreateBackup(schedule.ConnectionID)
+	backup, err := s.StartBackup(schedule.ConnectionID, []string{}) // Use default provider for scheduled backups
 	if err != nil {
 		if notifyErr := s.createFailureNotification(schedule.ConnectionID, err); notifyErr != nil {
 			fmt.Printf("Error creating failure notification: %v\n", notifyErr)
@@ -105,7 +106,12 @@ func (s *BackupService) executeCronBackup(schedule *BackupSchedule) {
 
 	// Update schedule's next run time and last backup time
 	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	cronSchedule, _ := parser.Parse(schedule.CronSchedule)
+	cronSchedule, err := parser.Parse(schedule.CronSchedule)
+	if err != nil {
+		fmt.Printf("Error parsing cron schedule %s for connection %s: %v\n", schedule.CronSchedule, schedule.ConnectionID, err)
+		// Don't update next run time if we can't parse the schedule
+		return
+	}
 	nextRun := cronSchedule.Next(time.Now())
 	schedule.NextRunTime = &nextRun
 	now := time.Now()
@@ -125,12 +131,46 @@ func (s *BackupService) cleanupOldBackups(connectionID string, retentionDays int
 	cutoffTime := time.Now().AddDate(0, 0, -retentionDays)
 	oldBackups, err := s.backupRepo.GetBackupsOlderThan(connectionID, cutoffTime)
 	if err != nil {
+		fmt.Printf("Error getting old backups for cleanup: %v\n", err)
 		return
 	}
 
+	// Get connection to access user ID for S3 operations
+	conn, err := s.connStorage.GetConnection(connectionID)
+	if err != nil {
+		fmt.Printf("Error getting connection for cleanup: %v\n", err)
+		return
+	}
+
+	ctx := context.Background()
 	for _, backup := range oldBackups {
-		os.Remove(backup.Path)
-		s.backupRepo.DeleteBackup(backup.ID.String())
+		// Delete local file if it exists
+		if backup.Path != "" {
+			if err := os.Remove(backup.Path); err != nil && !os.IsNotExist(err) {
+				fmt.Printf("Warning: Failed to remove local backup file %s: %v\n", backup.Path, err)
+			}
+		}
+
+		// Delete S3 backups
+		s3Providers, err := s.backupRepo.GetBackupS3Providers(backup.ID.String())
+		if err == nil && len(s3Providers) > 0 {
+			for _, providerInfo := range s3Providers {
+				s3Storage, err := s.GetS3ProviderForDownload(providerInfo.ProviderID, conn.UserID)
+				if err == nil {
+					if err := s3Storage.DeleteFile(ctx, providerInfo.ObjectKey); err != nil {
+						fmt.Printf("Warning: Failed to delete S3 backup %s from provider %s: %v\n", 
+							providerInfo.ObjectKey, providerInfo.ProviderID, err)
+					} else {
+						fmt.Printf("Deleted S3 backup %s from provider %s\n", providerInfo.ObjectKey, providerInfo.ProviderID)
+					}
+				}
+			}
+		}
+
+		// Delete backup record from database
+		if err := s.backupRepo.DeleteBackup(backup.ID.String()); err != nil {
+			fmt.Printf("Error deleting backup record %s: %v\n", backup.ID.String(), err)
+		}
 	}
 }
 

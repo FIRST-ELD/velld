@@ -67,6 +67,8 @@ var CommonBinaryPaths = map[string][]string{
 		"/usr/local/bin",
 		"/opt/homebrew/opt/postgresql@*/bin",
 		"/opt/homebrew/opt/mysql@*/bin",
+		"/usr/local/opt/postgresql@*/bin",  // Intel Mac Homebrew PostgreSQL versions
+		"/usr/local/opt/mysql@*/bin",       // Intel Mac Homebrew MySQL versions
 	},
 }
 
@@ -82,8 +84,38 @@ func FindBinaryPath(dbType, toolName string) string {
 	// }
 
 	// 2. Search common installation paths with wildcard support
+	// Prioritize versioned paths (postgresql@*, mysql@*) over generic paths
 	if paths, ok := CommonBinaryPaths[runtime.GOOS]; ok {
+		var versionedPaths []string
+		var genericPaths []string
+		
+		// Separate versioned and generic paths
 		for _, pathPattern := range paths {
+			if strings.Contains(pathPattern, "@") {
+				versionedPaths = append(versionedPaths, pathPattern)
+			} else {
+				genericPaths = append(genericPaths, pathPattern)
+			}
+		}
+		
+		// Search versioned paths first (they're more specific)
+		for _, pathPattern := range versionedPaths {
+			matches, _ := filepath.Glob(pathPattern)
+			// Sort matches to prefer higher version numbers
+			if len(matches) > 1 {
+				// Simple sort: extract version numbers and sort descending
+				matches = sortPathsByVersion(matches)
+			}
+			for _, path := range matches {
+				toolPath := filepath.Join(path, execName)
+				if _, err := os.Stat(toolPath); err == nil {
+					return path
+				}
+			}
+		}
+		
+		// Then search generic paths
+		for _, pathPattern := range genericPaths {
 			matches, _ := filepath.Glob(pathPattern)
 			for _, path := range matches {
 				toolPath := filepath.Join(path, execName)
@@ -100,6 +132,46 @@ func FindBinaryPath(dbType, toolName string) string {
 	}
 
 	return ""
+}
+
+// sortPathsByVersion sorts paths containing version numbers in descending order
+// e.g., ["postgresql@14", "postgresql@16"] -> ["postgresql@16", "postgresql@14"]
+func sortPathsByVersion(paths []string) []string {
+	// Extract version numbers and sort
+	type pathVersion struct {
+		path    string
+		version int
+	}
+	
+	var versions []pathVersion
+	for _, path := range paths {
+		// Extract version number from path like "/usr/local/opt/postgresql@16/bin"
+		parts := strings.Split(path, "@")
+		if len(parts) > 1 {
+			versionPart := strings.Split(parts[1], "/")[0]
+			// Try to extract numeric version
+			var version int
+			fmt.Sscanf(versionPart, "%d", &version)
+			versions = append(versions, pathVersion{path: path, version: version})
+		} else {
+			versions = append(versions, pathVersion{path: path, version: 0})
+		}
+	}
+	
+	// Sort by version descending
+	for i := 0; i < len(versions)-1; i++ {
+		for j := i + 1; j < len(versions); j++ {
+			if versions[i].version < versions[j].version {
+				versions[i], versions[j] = versions[j], versions[i]
+			}
+		}
+	}
+	
+	result := make([]string, len(versions))
+	for i, v := range versions {
+		result[i] = v.path
+	}
+	return result
 }
 
 func GetPlatformExecutableName(name string) string {

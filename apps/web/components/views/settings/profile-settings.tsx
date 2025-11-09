@@ -8,7 +8,6 @@ import { useProfile } from "@/hooks/use-profile";
 import { logout } from "@/lib/helper";
 import { Skeleton } from "@/components/ui/skeleton";
 import { NotificationSettings } from "./notification-settings";
-import { S3StorageSettings } from "./s3-storage-settings";
 import { PageHeader } from "@/components/layout/page-header";
 
 export function ProfileSettings() {
@@ -67,8 +66,6 @@ export function ProfileSettings() {
       </Card>
 
       <NotificationSettings />
-
-      <S3StorageSettings />
 
       <Card>
         <CardHeader>

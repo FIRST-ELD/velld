@@ -4,13 +4,15 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Database, Download, History, GitCompare, RefreshCw, RotateCcw } from "lucide-react";
+import { Database, Download, History, GitCompare, RefreshCw, RotateCcw, Terminal, Link2 } from "lucide-react";
+import { BackupJobViewer } from "@/components/views/backup/backup-job-viewer";
+import { DownloadBackupDialog } from "@/components/views/backup/download-backup-dialog";
 import { formatDistanceToNow, parseISO, subDays, isAfter } from "date-fns";
 import { useBackup } from "@/hooks/use-backup";
 import { BackupList } from "@/types/backup";
 import { statusColors } from "@/types/base";
 import { HistoryListSkeleton } from "@/components/ui/skeleton/history-list";
-import { calculateDuration, formatSize } from "@/lib/helper";
+import { calculateDuration, formatSize, formatBackupStatus } from "@/lib/helper";
 import { HistoryFilters } from "./history-filters";
 import { CustomPagination } from "@/components/ui/custom-pagination";
 import { useNotifications } from '@/hooks/use-notifications';
@@ -28,6 +30,9 @@ export function HistoryList() {
   const [selectedBackupForCompare, setSelectedBackupForCompare] = useState<BackupList | undefined>();
   const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
   const [selectedBackupForRestore, setSelectedBackupForRestore] = useState<BackupList | null>(null);
+  const [viewingBackupId, setViewingBackupId] = useState<string | null>(null);
+  const [downloadDialogOpen, setDownloadDialogOpen] = useState(false);
+  const [selectedBackupForDownload, setSelectedBackupForDownload] = useState<BackupList | null>(null);
   const isFetchingBackups = useIsFetching({ queryKey: ['backups'] });
   
   const [dateRange, setDateRange] = useState("all");
@@ -48,6 +53,11 @@ export function HistoryList() {
   const handleRestore = (backup: BackupList) => {
     setSelectedBackupForRestore(backup);
     setRestoreDialogOpen(true);
+  };
+
+  const handleDownload = (backup: BackupList) => {
+    setSelectedBackupForDownload(backup);
+    setDownloadDialogOpen(true);
   };
 
   const handleResetFilters = () => {
@@ -146,9 +156,9 @@ export function HistoryList() {
                               </Badge>
                               <Badge
                                 variant="secondary"
-                                className={statusColors[item.status as keyof typeof statusColors]}
+                                className={statusColors[item.status as keyof typeof statusColors] || "bg-gray-500/15 text-gray-500 border-gray-500/20"}
                               >
-                                {item.status}
+                                {formatBackupStatus(item.status)}
                               </Badge>
                             </div>
                             <p className="text-xs text-muted-foreground mt-2">
@@ -173,7 +183,7 @@ export function HistoryList() {
                             <Button 
                               variant="outline" 
                               size="sm" 
-                              onClick={() => downloadBackupFile({ id: item.id, path: item.path })}
+                              onClick={() => handleDownload(item)}
                               disabled={isDownloading}
                               className="flex-1"
                             >
@@ -181,15 +191,26 @@ export function HistoryList() {
                               Download
                             </Button>
                           </div>
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => handleCompare(item)}
-                            className="w-full"
-                          >
-                            <GitCompare className="h-4 w-4 mr-1" />
-                            Compare with Another
-                          </Button>
+                          <div className="flex gap-2">
+                            <Button 
+                              variant="outline" 
+                              size="sm"
+                              onClick={() => handleCompare(item)}
+                              className="flex-1"
+                            >
+                              <GitCompare className="h-4 w-4 mr-1" />
+                              Compare
+                            </Button>
+                            <Button 
+                              variant="outline" 
+                              size="sm"
+                              onClick={() => setViewingBackupId(item.id)}
+                              className="flex-1"
+                            >
+                              <Terminal className="h-4 w-4 mr-1" />
+                              View Logs
+                            </Button>
+                          </div>
                         </div>
                       </div>
 
@@ -260,7 +281,7 @@ export function HistoryList() {
                                   <Button
                                     variant="ghost"
                                     size="icon"
-                                    onClick={() => downloadBackupFile({ id: item.id, path: item.path })}
+                                    onClick={() => handleDownload(item)}
                                     disabled={isDownloading}
                                     >
                                     <Download className="h-4 w-4" />
@@ -268,6 +289,36 @@ export function HistoryList() {
                                 </TooltipTrigger>
                                 <TooltipContent side="top">
                                   <p className="text-xs">Download backup</p>
+                                </TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => handleDownload(item)}
+                                    >
+                                    <Link2 className="h-4 w-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                  <p className="text-xs">Share backup</p>
+                                </TooltipContent>
+                              </Tooltip>
+
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => setViewingBackupId(item.id)}
+                                    >
+                                    <Terminal className="h-4 w-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="top">
+                                  <p className="text-xs">View backup logs</p>
                                 </TooltipContent>
                               </Tooltip>
                             </TooltipProvider>
@@ -321,6 +372,28 @@ export function HistoryList() {
         open={restoreDialogOpen}
         onOpenChange={setRestoreDialogOpen}
       />
+
+      {viewingBackupId && (
+        <BackupJobViewer
+          backupId={viewingBackupId}
+          open={!!viewingBackupId}
+          onOpenChange={(open) => !open && setViewingBackupId(null)}
+        />
+      )}
+
+      {selectedBackupForDownload && (
+        <DownloadBackupDialog
+          open={downloadDialogOpen}
+          onOpenChange={(open) => {
+            setDownloadDialogOpen(open);
+            if (!open) {
+              setSelectedBackupForDownload(null);
+            }
+          }}
+          backupId={selectedBackupForDownload.id}
+          backupPath={selectedBackupForDownload.path || `backup-${selectedBackupForDownload.id}.sql`}
+        />
+      )}
     </Card>
   );
 }

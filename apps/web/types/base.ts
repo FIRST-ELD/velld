@@ -11,16 +11,19 @@ export interface Base<T> {
   pagination?: Pagination;
 }
 
-export type StatusColor = 'completed' | 'pending' | 'failed' | 'running' | 'connected' | 'disconnected' | 'error';
+export type StatusColor = 'completed' | 'pending' | 'failed' | 'running' | 'connected' | 'disconnected' | 'error' | 'success' | 'completed_with_errors' | 'in_progress';
 
 export const statusColors: Record<StatusColor, string> = {
   completed: "bg-emerald-500/15 text-emerald-500 border-emerald-500/20",
+  success: "bg-emerald-500/15 text-emerald-500 border-emerald-500/20",
   connected: "bg-emerald-500/15 text-emerald-500 border-emerald-500/20",
   pending: "bg-amber-500/15 text-amber-500 border-amber-500/20",
   disconnected: "bg-amber-500/15 text-amber-500 border-amber-500/20",
+  completed_with_errors: "bg-yellow-500/15 text-yellow-600 dark:text-yellow-500 border-yellow-500/20",
   failed: "bg-red-500/15 text-red-500 border-red-500/20",
   error: "bg-red-500/15 text-red-500 border-red-500/20",
   running: "bg-blue-500/15 text-blue-500 border-blue-500/20",
+  in_progress: "bg-blue-500/15 text-blue-500 border-blue-500/20",
 };
 
 export type DatabaseType = 'mysql' | 'postgresql' | 'mongodb' | 'redis';

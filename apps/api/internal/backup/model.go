@@ -27,7 +27,9 @@ type Backup struct {
 	Status        string     `json:"status"`
 	Path          string     `json:"path"`
 	S3ObjectKey   *string    `json:"s3_object_key"`
+	S3ProviderID  *string    `json:"s3_provider_id,omitempty"`
 	Size          int64      `json:"size"`
+	Logs          *string    `json:"logs,omitempty"`
 	StartedTime   time.Time  `json:"started_time"`
 	CompletedTime *time.Time `json:"completed_time"`
 	CreatedAt     time.Time  `json:"created_at"`
@@ -53,7 +55,8 @@ type BackupList struct {
 
 // BackupRequest represents a request to create a backup
 type BackupRequest struct {
-	ConnectionID string `json:"connection_id"`
+	ConnectionID string   `json:"connection_id"`
+	S3ProviderIDs []string `json:"s3_provider_ids,omitempty"` // Optional: specific providers to use. If empty, uses default provider.
 }
 
 // ScheduleBackupRequest represents a request to create a backup schedule

@@ -52,3 +52,13 @@ type UpdateSettingsRequest struct {
 	S3UseSSL     *bool   `json:"s3_use_ssl,omitempty"`
 	S3PathPrefix *string `json:"s3_path_prefix,omitempty"`
 }
+
+type TestS3ConnectionRequest struct {
+	Endpoint   string `json:"s3_endpoint"`
+	Region     string `json:"s3_region"`
+	Bucket     string `json:"s3_bucket"`
+	AccessKey  string `json:"s3_access_key"`
+	SecretKey  string `json:"s3_secret_key"`
+	UseSSL     bool   `json:"s3_use_ssl"`
+	PathPrefix string `json:"s3_path_prefix"`
+}

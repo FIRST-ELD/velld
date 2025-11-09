@@ -11,3 +11,20 @@ export async function updateUserSettings(settings: UpdateSettingsRequest): Promi
     body: JSON.stringify(settings),
   });
 }
+
+export interface TestS3ConnectionRequest {
+  s3_endpoint: string;
+  s3_region: string;
+  s3_bucket: string;
+  s3_access_key: string;
+  s3_secret_key: string;
+  s3_use_ssl: boolean;
+  s3_path_prefix: string;
+}
+
+export async function testS3Connection(params: TestS3ConnectionRequest): Promise<void> {
+  return apiRequest('/api/settings/test-s3', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}

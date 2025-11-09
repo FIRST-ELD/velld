@@ -72,8 +72,11 @@ export function HistoryFilters({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Status</SelectItem>
+            <SelectItem value="success">Success</SelectItem>
             <SelectItem value="completed">Completed</SelectItem>
+            <SelectItem value="completed_with_errors">Completed With Errors</SelectItem>
             <SelectItem value="failed">Failed</SelectItem>
+            <SelectItem value="in_progress">In Progress</SelectItem>
             <SelectItem value="running">Running</SelectItem>
           </SelectContent>
         </Select>

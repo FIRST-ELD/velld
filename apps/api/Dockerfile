@@ -13,9 +13,13 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o main cmd/api-server/main.go
 
 FROM alpine:latest
 
-RUN apk add --no-cache \
-    sqlite-libs \
-    postgresql-client \
+# Install database client tools
+# PostgreSQL 16 client (try version 16, fallback to default)
+RUN apk add --no-cache sqlite-libs && \
+    (apk add --no-cache --repository=http://dl-cdn.alpinelinux.org/alpine/v3.19/main postgresql16-client 2>/dev/null || \
+     apk add --no-cache --repository=http://dl-cdn.alpinelinux.org/alpine/edge/main postgresql16-client 2>/dev/null || \
+     apk add --no-cache postgresql-client) && \
+    apk add --no-cache \
     mysql-client \
     mongodb-tools \
     redis

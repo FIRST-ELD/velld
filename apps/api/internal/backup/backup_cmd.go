@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/dendianugerah/velld/internal/common"
 	"github.com/dendianugerah/velld/internal/connection"
@@ -67,17 +68,118 @@ func (s *BackupService) createPgDumpCmd(conn *connection.StoredConnection, outpu
 
 	binPath := filepath.Join(binaryPath, common.GetPlatformExecutableName(requiredTools["postgresql"]))
 
-	// Use original host/port (SSH tunnel handled at backup execution level)
+	// Base arguments for pg_dump
+	args := []string{
+		"-h", conn.Host,
+		"-p", fmt.Sprintf("%d", conn.Port),
+		"-U", conn.Username,
+		"-d", conn.DatabaseName,
+		"-F", "p", // Plain text format (SQL script)
+		"-f", outputPath,
+		"--no-owner",      // Don't dump ownership commands (helps with TimescaleDB and cross-database restores)
+		"--no-privileges", // Don't dump access privileges (helps with TimescaleDB and cross-database restores)
+		"--verbose",       // Verbose output shows progress: what tables/schemas are being dumped
+		// Note: --progress flag is only available for directory format (-F d), not plain format
+		// For plain format, we rely on --verbose output and file size monitoring
+	}
+
+	// Check if TimescaleDB is installed and log appropriate message
+	if s.isTimescaleDBInstalled(conn) {
+		// For TimescaleDB, the warnings about circular foreign keys in hypertable, chunk, and continuous_agg
+		// tables are expected and safe to ignore. These are part of TimescaleDB's internal architecture.
+		// The --no-owner and --no-privileges flags help ensure the backup can be restored properly.
+		// Note: We don't exclude these tables as they contain important metadata for hypertables.
+	}
+
+	cmd := exec.Command(binPath, args...)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", conn.Password))
+	return cmd
+}
+
+// isTimescaleDBInstalled checks if TimescaleDB extension is installed in the database
+func (s *BackupService) isTimescaleDBInstalled(conn *connection.StoredConnection) bool {
+	psqlPath := common.FindBinaryPath("postgresql", "psql")
+	if psqlPath == "" {
+		return false
+	}
+
+	binPath := filepath.Join(psqlPath, common.GetPlatformExecutableName("psql"))
+	
+	// Query to check if TimescaleDB extension exists
 	cmd := exec.Command(binPath,
 		"-h", conn.Host,
 		"-p", fmt.Sprintf("%d", conn.Port),
 		"-U", conn.Username,
 		"-d", conn.DatabaseName,
-		"-f", outputPath,
+		"-t", "-A", // terse, aligned output
+		"-c", "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'timescaledb');",
 	)
-
+	
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", conn.Password))
-	return cmd
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	result := strings.TrimSpace(string(output))
+	return result == "t" || result == "true" || result == "1"
+}
+
+// getPgDumpVersion returns the version of pg_dump being used
+func (s *BackupService) getPgDumpVersion() (string, error) {
+	binaryPath := s.findDatabaseBinaryPath("postgresql")
+	if binaryPath == "" {
+		return "", fmt.Errorf("pg_dump binary not found")
+	}
+
+	binPath := filepath.Join(binaryPath, common.GetPlatformExecutableName(requiredTools["postgresql"]))
+	cmd := exec.Command(binPath, "--version")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get pg_dump version: %v", err)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// getPostgreSQLServerVersion returns the PostgreSQL server version
+func (s *BackupService) getPostgreSQLServerVersion(conn *connection.StoredConnection) (string, error) {
+	// Find psql binary - we'll use common.FindBinaryPath directly since we need psql
+	psqlPath := common.FindBinaryPath("postgresql", "psql")
+	if psqlPath == "" {
+		return "", fmt.Errorf("psql binary not found")
+	}
+
+	binPath := filepath.Join(psqlPath, common.GetPlatformExecutableName("psql"))
+
+	// Query server version using psql
+	cmd := exec.Command(binPath,
+		"-h", conn.Host,
+		"-p", fmt.Sprintf("%d", conn.Port),
+		"-U", conn.Username,
+		"-d", conn.DatabaseName,
+		"-t", "-A", // terse, aligned output
+		"-c", "SELECT version();",
+	)
+	
+	cmd.Env = append(os.Environ(), fmt.Sprintf("PGPASSWORD=%s", conn.Password))
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get server version: %v", err)
+	}
+
+	version := strings.TrimSpace(string(output))
+	// Extract just the version number (e.g., "PostgreSQL 16.1" from full version string)
+	if strings.Contains(version, "PostgreSQL") {
+		parts := strings.Fields(version)
+		for i, part := range parts {
+			if part == "PostgreSQL" && i+1 < len(parts) {
+				return strings.TrimSpace(parts[i+1]), nil
+			}
+		}
+	}
+	
+	return version, nil
 }
 
 func (s *BackupService) createMySQLDumpCmd(conn *connection.StoredConnection, outputPath string) *exec.Cmd {

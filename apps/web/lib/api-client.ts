@@ -25,8 +25,11 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const apiUrl = await getConfig();
   const token = localStorage.getItem('token');
-  const headers = {
-    'Content-Type': 'application/json',
+  
+  // Don't set Content-Type for blob requests or if it's already set in options
+  const isBlobRequest = options.responseType === 'blob';
+  const headers: HeadersInit = {
+    ...(!isBlobRequest && { 'Content-Type': 'application/json' }),
     ...(token && { Authorization: `Bearer ${token}` }),
     ...options.headers,
   };
@@ -41,8 +44,29 @@ export async function apiRequest<T>(
       localStorage.removeItem('token');
       window.location.href = '/login';
     }
-    const error = await response.text();
-    throw new ApiError(response.status, error || `HTTP error! status: ${response.status}`);
+    
+    // Try to parse JSON error response
+    let errorMessage = `HTTP error! status: ${response.status}`;
+    try {
+      // For blob requests, we need to clone the response to read it
+      const clonedResponse = response.clone();
+      const errorText = await clonedResponse.text();
+      if (errorText) {
+        // Try to parse as JSON
+        try {
+          const parsed = JSON.parse(errorText);
+          errorMessage = parsed.message || errorText;
+        } catch {
+          // If not JSON, use the text as-is
+          errorMessage = errorText;
+        }
+      }
+    } catch (e) {
+      // If parsing fails, use default message
+      console.error("Error parsing error response:", e);
+    }
+    
+    throw new ApiError(response.status, errorMessage);
   }
 
   if (response.status === 204) {
