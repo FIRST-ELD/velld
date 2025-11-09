@@ -29,6 +29,8 @@ type Backup struct {
 	S3ObjectKey   *string    `json:"s3_object_key"`
 	S3ProviderID  *string    `json:"s3_provider_id,omitempty"`
 	Size          int64      `json:"size"`
+	MD5Hash       *string    `json:"md5_hash,omitempty"`
+	SHA256Hash    *string    `json:"sha256_hash,omitempty"`
 	Logs          *string    `json:"logs,omitempty"`
 	StartedTime   time.Time  `json:"started_time"`
 	CompletedTime *time.Time `json:"completed_time"`

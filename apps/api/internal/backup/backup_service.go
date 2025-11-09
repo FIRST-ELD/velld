@@ -341,14 +341,17 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 	// Stream backup data directly to S3 providers
 	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Starting streaming upload to %d S3 provider(s)...", len(providers)))
 	
+	// Calculate checksums as data streams through
+	checksumReader, getChecksums := CalculateStreamChecksums(stdoutPipe)
+	
 	// Create a pipe to stream backup data
 	pr, pw := io.Pipe()
 	
-	// Start goroutine to copy stdout to pipe
+	// Start goroutine to copy stdout to pipe with checksum calculation
 	var copyErr error
 	go func() {
 		defer pw.Close()
-		_, copyErr = io.Copy(pw, stdoutPipe)
+		_, copyErr = io.Copy(pw, checksumReader)
 	}()
 
 	// Stream to first provider, then copy to others
@@ -445,6 +448,25 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 		s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] File should be at: s3://%s/%s", s3Storage.GetBucket(), uploadedKey))
 	}
 
+	// Calculate and store checksums
+	md5Hash, sha256Hash, err := getChecksums()
+	if err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to calculate checksums: %v", err))
+	} else {
+		backup.MD5Hash = &md5Hash
+		backup.SHA256Hash = &sha256Hash
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Checksums calculated - MD5: %s, SHA256: %s", md5Hash, sha256Hash))
+	}
+
+	// Post-upload verification: Download and verify file integrity
+	s.sendLog(backup.ID.String(), "[INFO] Starting post-upload integrity verification...")
+	if err := s.verifyUploadedBackup(ctx, s3Storage, uploadedKey, backup); err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Post-upload verification failed: %v", err))
+		s.sendLog(backup.ID.String(), "[WARNING] Backup uploaded but integrity verification failed. Please verify manually.")
+	} else {
+		s.sendLog(backup.ID.String(), "[SUCCESS] Post-upload integrity verification passed")
+	}
+
 	// Store S3 info
 	backup.S3ObjectKey = &uploadedKey
 	providerIDStr := firstProvider.ID.String()
@@ -509,6 +531,17 @@ func (s *BackupService) executeFileBasedBackup(backup *Backup, conn *connection.
 	backup.CompletedTime = &now
 
 	s.sendLog(backup.ID.String(), fmt.Sprintf("Backup completed successfully. Size: %d bytes", backup.Size))
+
+	// Calculate checksums for the backup file
+	s.sendLog(backup.ID.String(), "[INFO] Calculating checksums for backup file...")
+	md5Hash, sha256Hash, err := CalculateFileChecksums(backupPath)
+	if err != nil {
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[WARNING] Failed to calculate checksums: %v", err))
+	} else {
+		backup.MD5Hash = &md5Hash
+		backup.SHA256Hash = &sha256Hash
+		s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Checksums calculated - MD5: %s, SHA256: %s", md5Hash, sha256Hash))
+	}
 
 	// Upload to S3 providers and determine final status
 	uploadErr := s.uploadToS3Providers(backup, conn.UserID, s3ProviderIDs)
@@ -995,6 +1028,78 @@ func (s *BackupService) isPostgreSQLVersionMismatchError(outputLines []string) b
 	return false
 }
 
+// verifyUploadedBackup downloads the uploaded backup from S3 and verifies its integrity
+// by checking that the file exists and has a valid size. This ensures the file was uploaded correctly.
+// Note: For compressed files uploaded via streaming, we verify the compressed file exists.
+// For uncompressed files, we can verify against the stored checksum.
+func (s *BackupService) verifyUploadedBackup(ctx context.Context, s3Storage *S3Storage, objectKey string, backup *Backup) error {
+	// Create a temporary file for download
+	tmpFile, err := os.CreateTemp("", "backup_verify_*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	// Download the file from S3
+	if err := s3Storage.DownloadFile(ctx, objectKey, tmpPath); err != nil {
+		return fmt.Errorf("failed to download file for verification: %w", err)
+	}
+
+	// Verify the file was downloaded successfully
+	fileInfo, err := os.Stat(tmpPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat downloaded file: %w", err)
+	}
+
+	if fileInfo.Size() == 0 {
+		return fmt.Errorf("downloaded file is empty")
+	}
+
+	// For uncompressed files (file-based backups), verify checksum matches
+	// For compressed files (streaming backups), we just verify the file exists and has content
+	if !strings.HasSuffix(objectKey, ".gz") && backup.SHA256Hash != nil && *backup.SHA256Hash != "" {
+		// This is an uncompressed file, verify checksum
+		_, downloadedSHA256, err := CalculateFileChecksums(tmpPath)
+		if err != nil {
+			return fmt.Errorf("failed to calculate checksum of downloaded file: %w", err)
+		}
+
+		if downloadedSHA256 != *backup.SHA256Hash {
+			return fmt.Errorf("checksum mismatch: expected %s, got %s", *backup.SHA256Hash, downloadedSHA256)
+		}
+	}
+
+	return nil
+}
+
+// verifyBackupBeforeRestore verifies the backup file integrity before restore
+func (s *BackupService) verifyBackupBeforeRestore(backup *Backup, filePath string) error {
+	if backup.SHA256Hash == nil || *backup.SHA256Hash == "" {
+		// No checksum stored, skip verification
+		return nil
+	}
+
+	// Verify the file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return fmt.Errorf("backup file not found: %s", filePath)
+	}
+
+	// Calculate checksum of the file
+	_, calculatedSHA256, err := CalculateFileChecksums(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to calculate checksum: %w", err)
+	}
+
+	// Compare checksums
+	if calculatedSHA256 != *backup.SHA256Hash {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s. File may be corrupted", *backup.SHA256Hash, calculatedSHA256)
+	}
+
+	return nil
+}
+
 // formatBytes formats bytes into human-readable format
 func (s *BackupService) formatBytes(bytes int64) string {
 	if bytes == 0 {
@@ -1198,6 +1303,42 @@ func (s *BackupService) uploadToS3Providers(backup *Backup, userID uuid.UUID, s3
 			// Track all successful S3 providers for this backup
 			if err := s.backupRepo.AddBackupS3Provider(backupID, result.provider.ID.String(), result.objectKey); err != nil {
 				s.sendLog(backupID, fmt.Sprintf("[WARNING] Failed to track S3 provider %s: %v", result.provider.Name, err))
+			}
+
+			// Post-upload verification for file-based backups
+			if backup.SHA256Hash != nil && *backup.SHA256Hash != "" {
+				ctx := context.Background()
+				// Recreate S3 storage for verification
+				region := "us-east-1"
+				if result.provider.Region != nil && *result.provider.Region != "" {
+					region = *result.provider.Region
+				}
+				pathPrefix := ""
+				if result.provider.PathPrefix != nil {
+					pathPrefix = *result.provider.PathPrefix
+				}
+				accessKey := cleanS3Credential(result.provider.AccessKey)
+				secretKey := cleanS3Credential(result.provider.SecretKey)
+				endpoint := strings.TrimSpace(result.provider.Endpoint)
+				bucket := cleanS3Credential(result.provider.Bucket)
+				s3Config := S3Config{
+					Endpoint:   endpoint,
+					Region:     region,
+					Bucket:     bucket,
+					AccessKey:  accessKey,
+					SecretKey:  secretKey,
+					UseSSL:     result.provider.UseSSL,
+					PathPrefix: pathPrefix,
+				}
+				verifyStorage, err := NewS3Storage(s3Config)
+				if err == nil {
+					s.sendLog(backupID, fmt.Sprintf("[INFO] Verifying uploaded backup integrity on %s...", result.provider.Name))
+					if err := s.verifyUploadedBackup(ctx, verifyStorage, result.objectKey, backup); err != nil {
+						s.sendLog(backupID, fmt.Sprintf("[WARNING] Post-upload verification failed for %s: %v", result.provider.Name, err))
+					} else {
+						s.sendLog(backupID, fmt.Sprintf("[SUCCESS] Post-upload verification passed for %s", result.provider.Name))
+					}
+				}
 			}
 		}
 	}

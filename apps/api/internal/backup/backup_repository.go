@@ -213,11 +213,11 @@ func (r *BackupRepository) GetAllActiveSchedules() ([]*BackupSchedule, error) {
 func (r *BackupRepository) CreateBackup(backup *Backup) error {
 	_, err := r.db.Exec(`
 		INSERT INTO backups (
-			id, connection_id, schedule_id, status, path, s3_object_key, s3_provider_id, size, logs,
+			id, connection_id, schedule_id, status, path, s3_object_key, s3_provider_id, size, md5_hash, sha256_hash, logs,
 			started_time, completed_time, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 		backup.ID, backup.ConnectionID, backup.ScheduleID,
-		backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.Logs,
+		backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.MD5Hash, backup.SHA256Hash, backup.Logs,
 		backup.StartedTime, backup.CompletedTime,
 		backup.CreatedAt, backup.UpdatedAt)
 	return err
@@ -258,12 +258,14 @@ func (r *BackupRepository) UpdateBackup(backup *Backup) error {
 				s3_object_key = $3,
 				s3_provider_id = $4,
 				size = $5,
-				logs = $6,
-				started_time = $7,
-				completed_time = $8,
-				updated_at = $9
-			WHERE id = $10`,
-			backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, logsValue,
+				md5_hash = $6,
+				sha256_hash = $7,
+				logs = $8,
+				started_time = $9,
+				completed_time = $10,
+				updated_at = $11
+			WHERE id = $12`,
+			backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.MD5Hash, backup.SHA256Hash, logsValue,
 			backup.StartedTime.Format(time.RFC3339), completedTimeStr,
 			time.Now().Format(time.RFC3339), backup.ID)
 		return err
@@ -276,11 +278,13 @@ func (r *BackupRepository) UpdateBackup(backup *Backup) error {
 				s3_object_key = $3,
 				s3_provider_id = $4,
 				size = $5,
-				started_time = $6,
-				completed_time = $7,
-				updated_at = $8
-			WHERE id = $9`,
-			backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size,
+				md5_hash = $6,
+				sha256_hash = $7,
+				started_time = $8,
+				completed_time = $9,
+				updated_at = $10
+			WHERE id = $11`,
+			backup.Status, backup.Path, backup.S3ObjectKey, backup.S3ProviderID, backup.Size, backup.MD5Hash, backup.SHA256Hash,
 			backup.StartedTime.Format(time.RFC3339), completedTimeStr,
 			time.Now().Format(time.RFC3339), backup.ID)
 		return err
@@ -332,13 +336,15 @@ func (r *BackupRepository) GetBackup(id string) (*Backup, error) {
 	)
 	var logsStr sql.NullString
 	var s3ProviderIDStr sql.NullString
+	var md5HashStr sql.NullString
+	var sha256HashStr sql.NullString
 	backup := &Backup{}
 	err := r.db.QueryRow(`
-		SELECT id, connection_id, schedule_id, status, path, s3_object_key, s3_provider_id, size, logs,
+		SELECT id, connection_id, schedule_id, status, path, s3_object_key, s3_provider_id, size, md5_hash, sha256_hash, logs,
 			   started_time, completed_time, created_at, updated_at 
 		FROM backups WHERE id = $1`, id).
 		Scan(&backup.ID, &backup.ConnectionID, &backup.ScheduleID,
-			&backup.Status, &backup.Path, &backup.S3ObjectKey, &s3ProviderIDStr, &backup.Size, &logsStr,
+			&backup.Status, &backup.Path, &backup.S3ObjectKey, &s3ProviderIDStr, &backup.Size, &md5HashStr, &sha256HashStr, &logsStr,
 			&startedTimeStr, &completedTimeStr,
 			&createdAtStr, &updatedAtStr)
 	if err != nil {
@@ -382,6 +388,14 @@ func (r *BackupRepository) GetBackup(id string) (*Backup, error) {
 	// Parse s3_provider_id if not null
 	if s3ProviderIDStr.Valid {
 		backup.S3ProviderID = &s3ProviderIDStr.String
+	}
+
+	// Parse checksums if not null
+	if md5HashStr.Valid {
+		backup.MD5Hash = &md5HashStr.String
+	}
+	if sha256HashStr.Valid {
+		backup.SHA256Hash = &sha256HashStr.String
 	}
 
 	return backup, nil

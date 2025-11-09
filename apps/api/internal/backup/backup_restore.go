@@ -56,6 +56,11 @@ func (s *BackupService) RestoreBackup(backupID string, connectionID string) erro
 		}
 	}
 
+	// Pre-restore verification: Verify backup file integrity before restore
+	if err := s.verifyBackupBeforeRestore(backup, backup.Path); err != nil {
+		return fmt.Errorf("backup integrity verification failed: %w", err)
+	}
+
 	conn, err := s.connStorage.GetConnection(connectionID)
 	if err != nil {
 		return fmt.Errorf("failed to get connection: %v", err)
