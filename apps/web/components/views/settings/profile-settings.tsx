@@ -1,23 +1,15 @@
 "use client";
 
-import { useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { LogOut, Shield, User } from "lucide-react";
+import { Shield, User } from "lucide-react";
 import { useProfile } from "@/hooks/use-profile";
-import { logout } from "@/lib/helper";
 import { Skeleton } from "@/components/ui/skeleton";
 import { NotificationSettings } from "./notification-settings";
 import { PageHeader } from "@/components/layout/page-header";
 
 export function ProfileSettings() {
-  const [isLoading, setIsLoading] = useState(false);
   const { data: profile, isLoading: isLoadingProfile } = useProfile();
-
-  const handleLogout = () => {
-    setIsLoading(true);
-    logout();
-  };
 
   return (
     <div className="space-y-6">
@@ -66,24 +58,6 @@ export function ProfileSettings() {
       </Card>
 
       <NotificationSettings />
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Sign Out</CardTitle>
-          <CardDescription>End your current session</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button 
-            variant="destructive" 
-            onClick={handleLogout}
-            disabled={isLoading}
-            className="w-full sm:w-auto"
-          >
-            <LogOut className="w-4 h-4 mr-2" />
-            {isLoading ? "Signing out..." : "Sign out"}
-          </Button>
-        </CardContent>
-      </Card>
     </div>
   );
 }
