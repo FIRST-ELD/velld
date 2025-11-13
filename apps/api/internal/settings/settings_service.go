@@ -183,6 +183,16 @@ func (s *SettingsService) UpdateUserSettings(userID uuid.UUID, req *UpdateSettin
 	if req.S3PathPrefix != nil {
 		settings.S3PathPrefix = req.S3PathPrefix
 	}
+	if req.BackupConcurrencyLimit != nil {
+		// Validate concurrency limit (1-20 range)
+		if *req.BackupConcurrencyLimit < 1 {
+			settings.BackupConcurrencyLimit = 1
+		} else if *req.BackupConcurrencyLimit > 20 {
+			settings.BackupConcurrencyLimit = 20
+		} else {
+			settings.BackupConcurrencyLimit = *req.BackupConcurrencyLimit
+		}
+	}
 
 	if err := s.repo.UpdateUserSettings(settings); err != nil {
 		return nil, err

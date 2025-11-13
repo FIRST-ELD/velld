@@ -123,6 +123,7 @@ func main() {
 	protected.HandleFunc("/backups/{id}/share", backupHandler.CreateShareableLink).Methods("POST", "OPTIONS")
 	protected.HandleFunc("/backups/{id}/logs", backupHandler.StreamBackupLogs).Methods("GET", "OPTIONS")
 	protected.HandleFunc("/backups/{id}/logs/stored", backupHandler.GetBackupLogs).Methods("GET", "OPTIONS")
+	protected.HandleFunc("/backups/{id}/stop", backupHandler.StopBackup).Methods("POST", "OPTIONS")
 	protected.HandleFunc("/backups/restore", backupHandler.RestoreBackup).Methods("POST", "OPTIONS")
 	
 	// Public route for shareable links (no auth required)

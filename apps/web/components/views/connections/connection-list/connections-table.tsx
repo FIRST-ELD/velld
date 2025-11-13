@@ -18,14 +18,17 @@ import {
   Pencil, 
   Trash2,
   Settings2,
-  ArrowUpDown
+  ArrowUpDown,
+  Loader2,
+  FileText,
+  Square
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Connection } from '@/types/connection';
 import { typeLabels } from '@/types/base';
 import { useBackup } from '@/hooks/use-backup';
-import { useState } from 'react';
-import { BackupJobViewer } from '@/components/views/backup/backup-job-viewer';
+import { useState, useEffect } from 'react';
+import { BackupLogViewer } from '@/components/views/backup/backup-log-viewer';
 
 interface ConnectionsTableProps {
   connections: Connection[];
@@ -43,20 +46,76 @@ export function ConnectionsTable({
   onDelete,
   onSchedule,
 }: ConnectionsTableProps) {
-  const { createBackup, isCreating } = useBackup();
+  const { createBackup, stopBackupProcess, isStopping } = useBackup();
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
-  const [viewingBackupId, setViewingBackupId] = useState<string | null>(null);
+  // Track loading state per connection: connectionId -> { backupId, isLoading }
+  const [loadingStates, setLoadingStates] = useState<Map<string, { backupId: string; isLoading: boolean }>>(new Map());
+  const [viewingLogsBackupId, setViewingLogsBackupId] = useState<string | null>(null);
 
   const handleCreateBackup = (connectionId: string, s3ProviderIds?: string[]) => {
+    // Prevent starting if already loading
+    if (loadingStates.has(connectionId) && loadingStates.get(connectionId)?.isLoading) {
+      return;
+    }
+
     createBackup({ connectionId, s3ProviderIds }, {
       onSuccess: (data) => {
         if (data?.id) {
-          setViewingBackupId(data.id);
+          // Set loading state for this connection
+          setLoadingStates(prev => {
+            const newMap = new Map(prev);
+            newMap.set(connectionId, { backupId: data.id, isLoading: true });
+            return newMap;
+          });
         }
+      },
+      onError: () => {
+        // Clear loading state on error
+        setLoadingStates(prev => {
+          const newMap = new Map(prev);
+          newMap.delete(connectionId);
+          return newMap;
+        });
       },
     });
   };
+
+  // Poll backup status for connections that are loading
+  useEffect(() => {
+    if (loadingStates.size === 0) return;
+
+    const checkBackupStatus = async (connectionId: string, backupId: string) => {
+      try {
+        const { getBackup } = await import('@/lib/api/backups');
+        const backup = await getBackup(backupId);
+        
+        // If backup is no longer in progress, clear loading state
+        if (backup.status !== 'in_progress') {
+          setLoadingStates(prev => {
+            const newMap = new Map(prev);
+            const current = newMap.get(connectionId);
+            if (current?.backupId === backupId) {
+              newMap.delete(connectionId);
+            }
+            return newMap;
+          });
+        }
+      } catch (error) {
+        console.error('Failed to check backup status:', error);
+      }
+    };
+
+    const interval = setInterval(() => {
+      loadingStates.forEach((state, connectionId) => {
+        if (state.isLoading) {
+          checkBackupStatus(connectionId, state.backupId);
+        }
+      });
+    }, 3000); // Check every 3 seconds
+
+    return () => clearInterval(interval);
+  }, [loadingStates]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -217,72 +276,139 @@ export function ConnectionsTable({
                         </span>
                       </TableCell>
                       <TableCell className="text-right py-3.5">
-                        <div className="flex items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-                          <Tooltip delayDuration={300}>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleCreateBackup(connection.id)}
-                                disabled={isCreating}
-                                className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
-                              >
-                                <Play className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              <p className="text-xs">Backup Now</p>
-                            </TooltipContent>
-                          </Tooltip>
+                        {(() => {
+                          const loadingState = loadingStates.get(connection.id);
+                          const isConnectionLoading = loadingState?.isLoading || false;
                           
-                          <Tooltip delayDuration={300}>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => onSchedule(connection.id)}
-                                className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
-                              >
-                                <Settings2 className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              <p className="text-xs">Schedule Backup</p>
-                            </TooltipContent>
-                          </Tooltip>
-                          
-                          <Tooltip delayDuration={300}>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => onEdit(connection.id)}
-                                className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
-                              >
-                                <Pencil className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              <p className="text-xs">Edit Connection</p>
-                            </TooltipContent>
-                          </Tooltip>
-                          
-                          <Tooltip delayDuration={300}>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => onDelete(connection)}
-                                className="h-8 w-8 p-0 text-destructive/80 hover:text-destructive hover:bg-destructive/10 transition-all duration-150 hover:scale-105"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              <p className="text-xs">Delete Connection</p>
-                            </TooltipContent>
-                          </Tooltip>
-                        </div>
+                          return (
+                            <div className="flex items-center justify-end gap-0.5">
+                              {/* Logs and Stop buttons - always visible when loading */}
+                              {isConnectionLoading && loadingState?.backupId && (
+                                <>
+                                  <Tooltip delayDuration={300}>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => setViewingLogsBackupId(loadingState.backupId)}
+                                        className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
+                                      >
+                                        <FileText className="h-3.5 w-3.5" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top">
+                                      <p className="text-xs">View Logs</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                  <Tooltip delayDuration={300}>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        onClick={() => {
+                                          stopBackupProcess(loadingState.backupId, {
+                                            onSuccess: () => {
+                                              // Clear loading state when backup is stopped
+                                              setLoadingStates(prev => {
+                                                const newMap = new Map(prev);
+                                                newMap.delete(connection.id);
+                                                return newMap;
+                                              });
+                                            },
+                                          });
+                                        }}
+                                        disabled={isStopping}
+                                        className="h-8 w-8 p-0 hover:bg-destructive/10 hover:text-destructive transition-all duration-150 hover:scale-105"
+                                      >
+                                        <Square className="h-3.5 w-3.5" />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent side="top">
+                                      <p className="text-xs">Stop Backup</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </>
+                              )}
+                              
+                              {/* Action buttons - visible on hover or when loading */}
+                              <div className={cn(
+                                "flex items-center gap-0.5 transition-opacity duration-200",
+                                isConnectionLoading ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                              )}>
+                                <Tooltip delayDuration={300}>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => handleCreateBackup(connection.id)}
+                                      disabled={isConnectionLoading}
+                                      className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
+                                    >
+                                      {isConnectionLoading ? (
+                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                      ) : (
+                                        <Play className="h-3.5 w-3.5" />
+                                      )}
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    <p className="text-xs">
+                                      {isConnectionLoading ? "Backup in progress..." : "Backup Now"}
+                                    </p>
+                                  </TooltipContent>
+                                </Tooltip>
+                                
+                                <Tooltip delayDuration={300}>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => onSchedule(connection.id)}
+                                      className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
+                                    >
+                                      <Settings2 className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    <p className="text-xs">Schedule Backup</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                                
+                                <Tooltip delayDuration={300}>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => onEdit(connection.id)}
+                                      className="h-8 w-8 p-0 hover:bg-accent/80 transition-all duration-150 hover:scale-105"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    <p className="text-xs">Edit Connection</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                                
+                                <Tooltip delayDuration={300}>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => onDelete(connection)}
+                                      className="h-8 w-8 p-0 text-destructive/80 hover:text-destructive hover:bg-destructive/10 transition-all duration-150 hover:scale-105"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    <p className="text-xs">Delete Connection</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </TableCell>
                     </TableRow>
                   );
@@ -292,11 +418,11 @@ export function ConnectionsTable({
           </Table>
         </div>
       </TooltipProvider>
-      {viewingBackupId && (
-        <BackupJobViewer
-          backupId={viewingBackupId}
-          open={!!viewingBackupId}
-          onOpenChange={(open) => !open && setViewingBackupId(null)}
+      {viewingLogsBackupId && (
+        <BackupLogViewer
+          backupId={viewingLogsBackupId}
+          open={!!viewingLogsBackupId}
+          onClose={() => setViewingLogsBackupId(null)}
         />
       )}
     </div>

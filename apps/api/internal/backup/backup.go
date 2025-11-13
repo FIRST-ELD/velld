@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dendianugerah/velld/internal/common"
@@ -310,7 +311,7 @@ func (h *BackupHandler) RestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.backupService.RestoreBackup(req.BackupID, req.ConnectionID)
+	err := h.backupService.RestoreBackup(req.BackupID, req.ConnectionID, req.TargetDatabaseName, req.SkipChecksumVerification)
 	if err != nil {
 		response.SendError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -397,6 +398,28 @@ func (h *BackupHandler) GetActiveBackups(w http.ResponseWriter, r *http.Request)
 	}
 
 	response.SendSuccess(w, "Active backups retrieved successfully", backups)
+}
+
+func (h *BackupHandler) StopBackup(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	backupID := vars["id"]
+
+	if backupID == "" {
+		response.SendError(w, http.StatusBadRequest, "backup_id is required")
+		return
+	}
+
+	err := h.backupService.StopBackup(backupID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not running") || strings.Contains(err.Error(), "not in progress") {
+			response.SendError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		response.SendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	response.SendSuccess(w, "Backup stopped successfully", nil)
 }
 
 func (h *BackupHandler) GetBackupLogs(w http.ResponseWriter, r *http.Request) {

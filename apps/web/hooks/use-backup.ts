@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getBackups, saveBackup, scheduleBackup, disableBackupSchedule, updateSchedule, getBackupStats, downloadBackup, restoreBackup } from "@/lib/api/backups";
+import { getBackups, saveBackup, scheduleBackup, disableBackupSchedule, updateSchedule, getBackupStats, downloadBackup, restoreBackup, stopBackup } from "@/lib/api/backups";
 import { useToast } from "@/hooks/use-toast";
 import { useState } from 'react';
 
@@ -145,8 +145,13 @@ export function useBackup() {
   });
 
   const { mutate: restoreBackupToDatabase, isPending: isRestoring } = useMutation({
-    mutationFn: async (params: { backupId: string; connectionId: string }) => {
-      await restoreBackup({ backup_id: params.backupId, connection_id: params.connectionId });
+    mutationFn: async (params: { backupId: string; connectionId: string; targetDatabaseName?: string; skipChecksumVerification?: boolean }) => {
+      await restoreBackup({ 
+        backup_id: params.backupId, 
+        connection_id: params.connectionId,
+        target_database_name: params.targetDatabaseName,
+        skip_checksum_verification: params.skipChecksumVerification,
+      });
     },
     onSuccess: () => {
       toast({
@@ -158,6 +163,27 @@ export function useBackup() {
       toast({
         title: "Error",
         description: error.message || "Failed to restore backup",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const { mutate: stopBackupProcess, isPending: isStopping } = useMutation({
+    mutationFn: async (backupId: string) => {
+      await stopBackup(backupId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['backups']});
+      queryClient.invalidateQueries({ queryKey: ['connections']});
+      toast({
+        title: "Success",
+        description: "Backup stopped successfully",
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to stop backup",
         variant: "destructive",
       });
     },
@@ -176,6 +202,8 @@ export function useBackup() {
     isDownloading,
     restoreBackupToDatabase,
     isRestoring,
+    stopBackupProcess,
+    isStopping,
     backups: data?.data,
     pagination: data?.pagination,
     isLoading,

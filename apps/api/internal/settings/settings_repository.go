@@ -24,7 +24,7 @@ func (r *SettingsRepository) GetUserSettings(userID uuid.UUID) (*UserSettings, e
         SELECT id, user_id, notify_dashboard, notify_email, notify_webhook, notify_telegram,
                webhook_url, email, telegram_bot_token, telegram_chat_id, smtp_host, smtp_port, smtp_username, 
                smtp_password, s3_enabled, s3_endpoint, s3_region, s3_bucket,
-               s3_access_key, s3_secret_key, s3_use_ssl, s3_path_prefix,
+               s3_access_key, s3_secret_key, s3_use_ssl, s3_path_prefix, backup_concurrency_limit,
                created_at, updated_at
         FROM user_settings
         WHERE user_id = $1`, userID).Scan(
@@ -34,18 +34,20 @@ func (r *SettingsRepository) GetUserSettings(userID uuid.UUID) (*UserSettings, e
 		&settings.SMTPUsername, &settings.SMTPPassword,
 		&settings.S3Enabled, &settings.S3Endpoint, &settings.S3Region, &settings.S3Bucket,
 		&settings.S3AccessKey, &settings.S3SecretKey, &settings.S3UseSSL, &settings.S3PathPrefix,
+		&settings.BackupConcurrencyLimit,
 		&createdAtStr, &updatedAtStr)
 
 	if err == sql.ErrNoRows {
 		// Create default settings if none exist
 		now := time.Now()
 		settings = &UserSettings{
-			ID:              uuid.New(),
-			UserID:          userID,
-			NotifyDashboard: true,
-			S3UseSSL:        true,
-			CreatedAt:       now,
-			UpdatedAt:       now,
+			ID:                      uuid.New(),
+			UserID:                  userID,
+			NotifyDashboard:         true,
+			S3UseSSL:                true,
+			BackupConcurrencyLimit:  3,
+			CreatedAt:               now,
+			UpdatedAt:               now,
 		}
 		return settings, r.CreateUserSettings(settings)
 	}
@@ -74,15 +76,16 @@ func (r *SettingsRepository) CreateUserSettings(settings *UserSettings) error {
             id, user_id, notify_dashboard, notify_email, notify_webhook, notify_telegram,
             webhook_url, email, telegram_bot_token, telegram_chat_id, smtp_host, smtp_port, smtp_username, 
             smtp_password, s3_enabled, s3_endpoint, s3_region, s3_bucket,
-            s3_access_key, s3_secret_key, s3_use_ssl, s3_path_prefix,
+            s3_access_key, s3_secret_key, s3_use_ssl, s3_path_prefix, backup_concurrency_limit,
             created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)`,
 		settings.ID, settings.UserID, settings.NotifyDashboard,
 		settings.NotifyEmail, settings.NotifyWebhook, settings.NotifyTelegram, settings.WebhookURL,
 		settings.Email, settings.TelegramBotToken, settings.TelegramChatID, settings.SMTPHost, settings.SMTPPort,
 		settings.SMTPUsername, settings.SMTPPassword,
 		settings.S3Enabled, settings.S3Endpoint, settings.S3Region, settings.S3Bucket,
 		settings.S3AccessKey, settings.S3SecretKey, settings.S3UseSSL, settings.S3PathPrefix,
+		settings.BackupConcurrencyLimit,
 		settings.CreatedAt, settings.UpdatedAt)
 	return err
 }
@@ -96,14 +99,14 @@ func (r *SettingsRepository) UpdateUserSettings(settings *UserSettings) error {
             smtp_host = $9, smtp_port = $10, smtp_username = $11, smtp_password = $12,
             s3_enabled = $13, s3_endpoint = $14, s3_region = $15, s3_bucket = $16,
             s3_access_key = $17, s3_secret_key = $18, s3_use_ssl = $19,
-            s3_path_prefix = $20, updated_at = $21
-        WHERE user_id = $22`,
+            s3_path_prefix = $20, backup_concurrency_limit = $21, updated_at = $22
+        WHERE user_id = $23`,
 		settings.NotifyDashboard, settings.NotifyEmail, settings.NotifyWebhook, settings.NotifyTelegram,
 		settings.WebhookURL, settings.Email, settings.TelegramBotToken, settings.TelegramChatID,
 		settings.SMTPHost, settings.SMTPPort, settings.SMTPUsername, settings.SMTPPassword,
 		settings.S3Enabled, settings.S3Endpoint, settings.S3Region, settings.S3Bucket,
 		settings.S3AccessKey, settings.S3SecretKey, settings.S3UseSSL, settings.S3PathPrefix,
-		settings.UpdatedAt, settings.UserID)
+		settings.BackupConcurrencyLimit, settings.UpdatedAt, settings.UserID)
 	return err
 }
 

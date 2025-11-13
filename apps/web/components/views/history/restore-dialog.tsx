@@ -17,6 +17,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { AlertCircle, Database } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useConnections } from "@/hooks/use-connections";
@@ -31,6 +33,9 @@ interface RestoreDialogProps {
 
 export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps) {
   const [selectedConnectionId, setSelectedConnectionId] = useState<string>("");
+  const [targetDatabaseName, setTargetDatabaseName] = useState<string>("");
+  const [useCustomDatabase, setUseCustomDatabase] = useState(false);
+  const [skipChecksumVerification, setSkipChecksumVerification] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   
   const { connections, isLoading: isLoadingConnections } = useConnections();
@@ -43,11 +48,15 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
       {
         backupId: backup.id,
         connectionId: selectedConnectionId,
+        targetDatabaseName: useCustomDatabase && targetDatabaseName.trim() ? targetDatabaseName.trim() : undefined,
+        skipChecksumVerification: skipChecksumVerification,
       },
       {
         onSuccess: () => {
           onOpenChange(false);
           setSelectedConnectionId("");
+          setTargetDatabaseName("");
+          setUseCustomDatabase(false);
           setConfirmed(false);
         },
       }
@@ -57,7 +66,21 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
   const handleCancel = () => {
     onOpenChange(false);
     setSelectedConnectionId("");
+    setTargetDatabaseName("");
+    setUseCustomDatabase(false);
+    setSkipChecksumVerification(false);
     setConfirmed(false);
+  };
+
+  // Reset custom database name when connection changes
+  const handleConnectionChange = (connectionId: string) => {
+    setSelectedConnectionId(connectionId);
+    if (!useCustomDatabase) {
+      const conn = connections?.find(c => c.id === connectionId);
+      if (conn) {
+        setTargetDatabaseName(conn.database_name || "");
+      }
+    }
   };
 
   const selectedConnection = connections?.find(
@@ -97,10 +120,10 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Target Database</label>
+            <Label className="text-sm font-medium">Target Connection</Label>
             <Select
               value={selectedConnectionId}
-              onValueChange={setSelectedConnectionId}
+              onValueChange={handleConnectionChange}
               disabled={isLoadingConnections || isRestoring}
             >
               <SelectTrigger>
@@ -129,12 +152,88 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
             </Select>
           </div>
 
-          <Alert>
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription className="text-sm">
-              <strong>Tip:</strong> Create a new empty database first (e.g. <strong>{selectedConnection?.name}_new</strong>), restore there, test, then switch.
-            </AlertDescription>
-          </Alert>
+          {selectedConnectionId && (
+            <>
+              <div className="flex items-start space-x-2">
+                <input
+                  type="checkbox"
+                  id="use-custom-db"
+                  checked={useCustomDatabase}
+                  onChange={(e) => {
+                    setUseCustomDatabase(e.target.checked);
+                    if (!e.target.checked) {
+                      const conn = connections?.find(c => c.id === selectedConnectionId);
+                      setTargetDatabaseName(conn?.database_name || "");
+                    }
+                  }}
+                  className="h-4 w-4 rounded border-gray-300 mt-1"
+                  disabled={isRestoring}
+                />
+                <label
+                  htmlFor="use-custom-db"
+                  className="text-sm leading-tight cursor-pointer flex-1"
+                >
+                  Restore to a different database name
+                </label>
+              </div>
+
+              {useCustomDatabase && (
+                <div className="space-y-2">
+                  <Label htmlFor="target-db-name" className="text-sm font-medium">
+                    Target Database Name
+                  </Label>
+                  <Input
+                    id="target-db-name"
+                    value={targetDatabaseName}
+                    onChange={(e) => setTargetDatabaseName(e.target.value)}
+                    placeholder={selectedConnection?.database_name || "Enter database name"}
+                    disabled={isRestoring}
+                    className="font-mono"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The database must already exist. If it doesn't exist, create it first on the target server.
+                  </p>
+                </div>
+              )}
+
+              {!useCustomDatabase && selectedConnection && (
+                <div className="rounded-lg border p-3 bg-muted/50">
+                  <p className="text-sm font-medium">Target Database</p>
+                  <p className="text-sm text-muted-foreground font-mono">
+                    {selectedConnection.database_name}
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+
+          {selectedConnectionId && (
+            <>
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription className="text-sm">
+                  <strong>Important:</strong> The target database must exist. If you're restoring to a different database name, make sure to create it first on the target server.
+                </AlertDescription>
+              </Alert>
+              
+              <div className="flex items-start space-x-2">
+                <input
+                  type="checkbox"
+                  id="skip-checksum"
+                  checked={skipChecksumVerification}
+                  onChange={(e) => setSkipChecksumVerification(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 mt-1"
+                  disabled={isRestoring}
+                />
+                <label
+                  htmlFor="skip-checksum"
+                  className="text-sm leading-tight cursor-pointer flex-1"
+                >
+                  Skip checksum verification (use if you're getting checksum errors but know the file is correct)
+                </label>
+              </div>
+            </>
+          )}
 
           <div className="flex items-start space-x-2">
             <input
@@ -149,7 +248,10 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
               htmlFor="confirm-restore"
               className="text-sm leading-tight cursor-pointer"
             >
-              Confirm restore to <strong>{selectedConnection?.name || 'selected database'}</strong>
+              Confirm restore to <strong>{selectedConnection?.name || 'selected connection'}</strong>
+              {useCustomDatabase && targetDatabaseName && (
+                <> (database: <strong className="font-mono">{targetDatabaseName}</strong>)</>
+              )}
             </label>
           </div>
         </div>

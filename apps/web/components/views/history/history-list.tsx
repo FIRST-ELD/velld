@@ -4,7 +4,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Database, Download, History, GitCompare, RefreshCw, RotateCcw, Terminal, Link2 } from "lucide-react";
+import { Database, Download, History, GitCompare, RefreshCw, RotateCcw, Terminal, Link2, Square } from "lucide-react";
 import { BackupJobViewer } from "@/components/views/backup/backup-job-viewer";
 import { DownloadBackupDialog } from "@/components/views/backup/download-backup-dialog";
 import { formatDistanceToNow, parseISO, subDays, isAfter } from "date-fns";
@@ -24,7 +24,7 @@ import { useState, useMemo } from "react";
 import { useIsFetching } from "@tanstack/react-query";
 
 export function HistoryList() {
-  const { backups, isLoading, pagination, page, setPage, downloadBackupFile, isDownloading, search, setSearch } = useBackup();
+  const { backups, isLoading, pagination, page, setPage, downloadBackupFile, isDownloading, search, setSearch, stopBackupProcess, isStopping } = useBackup();
   const { notifications, isLoading: isLoadingNotifications, markNotificationsAsRead } = useNotifications();
   const [compareDialogOpen, setCompareDialogOpen] = useState(false);
   const [selectedBackupForCompare, setSelectedBackupForCompare] = useState<BackupList | undefined>();
@@ -74,7 +74,7 @@ export function HistoryList() {
       const searchLower = search.toLowerCase();
       const matchesSearch = !search || 
         backup.path.toLowerCase().includes(searchLower) ||
-        backup.database_type.toLowerCase().includes(searchLower);
+        (backup.database_type && backup.database_type.toLowerCase().includes(searchLower));
 
       let matchesDateRange = true;
       if (dateRange !== "all") {
@@ -95,7 +95,7 @@ export function HistoryList() {
       }
 
       const matchesStatus = status === "all" || backup.status.toLowerCase() === status.toLowerCase();
-      const matchesDatabaseType = databaseType === "all" || backup.database_type.toLowerCase() === databaseType.toLowerCase();
+      const matchesDatabaseType = databaseType === "all" || (backup.database_type && backup.database_type.toLowerCase() === databaseType.toLowerCase());
 
       return matchesSearch && matchesDateRange && matchesStatus && matchesDatabaseType;
     });
@@ -165,7 +165,7 @@ export function HistoryList() {
                               {formatDistanceToNow(parseISO(item.created_at), { addSuffix: true })}
                             </p>
                             <p className="text-xs text-muted-foreground">
-                              {formatSize(item.size)} • {calculateDuration(item.started_time, item.completed_time)}
+                              {formatSize(item.size)} • {item.completed_time ? calculateDuration(item.started_time, item.completed_time) : "In progress"}
                             </p>
                           </div>
                         </div>
@@ -210,6 +210,18 @@ export function HistoryList() {
                               <Terminal className="h-4 w-4 mr-1" />
                               View Logs
                             </Button>
+                            {item.status === "in_progress" && (
+                              <Button 
+                                variant="outline" 
+                                size="sm"
+                                onClick={() => stopBackupProcess(item.id)}
+                                disabled={isStopping}
+                                className="flex-1 hover:bg-destructive/10 hover:text-destructive"
+                              >
+                                <Square className="h-4 w-4 mr-1" />
+                                Stop
+                              </Button>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -241,7 +253,7 @@ export function HistoryList() {
                               {item.status}
                             </Badge>
                             <p className="text-sm text-muted-foreground mt-1">
-                              {calculateDuration(item.started_time, item.completed_time)}
+                              {item.completed_time ? calculateDuration(item.started_time, item.completed_time) : "In progress"}
                             </p>
                           </div>
                           <div className="flex space-x-2">
@@ -321,6 +333,25 @@ export function HistoryList() {
                                   <p className="text-xs">View backup logs</p>
                                 </TooltipContent>
                               </Tooltip>
+
+                              {item.status === "in_progress" && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      onClick={() => stopBackupProcess(item.id)}
+                                      disabled={isStopping}
+                                      className="hover:bg-destructive/10 hover:text-destructive"
+                                    >
+                                      <Square className="h-4 w-4" />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top">
+                                    <p className="text-xs">Stop backup</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              )}
                             </TooltipProvider>
                           </div>
                         </div>

@@ -10,6 +10,8 @@ export interface GetBackupsParams {
 export interface RestoreBackupParams {
   backup_id: string;
   connection_id: string;
+  target_database_name?: string; // Optional: restore to different database name
+  skip_checksum_verification?: boolean; // Optional: skip checksum verification
 }
 
 export async function saveBackup(connectionId: string, s3ProviderIds?: string[]): Promise<{ id: string }> {
@@ -150,6 +152,12 @@ export async function getBackupLogs(backupId: string): Promise<string> {
     method: 'GET',
   });
   return response.data.logs || '';
+}
+
+export async function stopBackup(backupId: string): Promise<void> {
+  return apiRequest(`/api/backups/${backupId}/stop`, {
+    method: 'POST',
+  });
 }
 
 export function streamBackupLogs(backupId: string, onLog: (log: string) => void, onError?: (error: Error) => void, onClose?: () => void): () => void {

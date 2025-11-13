@@ -50,6 +50,15 @@ type BackupService struct {
 	logStreamsMutex   sync.RWMutex
 	logWriteQueue     map[string][]string // Queue logs for batched writes
 	logWriteQueueMutex sync.Mutex
+	// Concurrency control
+	concurrencySemaphore chan struct{} // Semaphore for limiting concurrent backups
+	concurrencyLimit     int           // Current concurrency limit
+	concurrencyMutex     sync.RWMutex  // Protects concurrency limit updates
+	// Command tracking for cancellation
+	runningCommands    map[string]*exec.Cmd // map[backupID]*exec.Cmd
+	runningCommandsMutex sync.RWMutex       // Protects running commands map
+	runningContexts     map[string]context.CancelFunc // map[backupID]cancelFunc
+	runningContextsMutex sync.RWMutex                 // Protects running contexts map
 }
 
 func NewBackupService(
@@ -66,6 +75,9 @@ func NewBackupService(
 	}
 
 	cronManager := cron.New(cron.WithSeconds())
+	
+	// Initialize with default concurrency limit of 3
+	defaultLimit := 3
 	service := &BackupService{
 		connStorage:       connStorage,
 		backupDir:         backupDir,
@@ -78,6 +90,10 @@ func NewBackupService(
 		cronEntries:       make(map[string]cron.EntryID),
 		logStreams:        make(map[string]chan string),
 		logWriteQueue:     make(map[string][]string),
+		concurrencyLimit:   defaultLimit,
+		concurrencySemaphore: make(chan struct{}, defaultLimit),
+		runningCommands:    make(map[string]*exec.Cmd),
+		runningContexts:     make(map[string]context.CancelFunc),
 	}
 
 	// Recover existing schedules before starting the cron manager
@@ -165,14 +181,180 @@ func (s *BackupService) StartBackup(connectionID string, s3ProviderIDs []string)
 		return nil, fmt.Errorf("failed to create backup record: %w", err)
 	}
 
-	// Run backup asynchronously
-	go s.executeBackup(backup, conn, backupPath, filename, s3ProviderIDs)
+	// Get user's concurrency limit and update if needed
+	userSettings, err := s.settingsService.GetUserSettingsInternal(conn.UserID)
+	if err == nil {
+		userLimit := userSettings.BackupConcurrencyLimit
+		if userLimit < 1 {
+			userLimit = 1
+		} else if userLimit > 20 {
+			userLimit = 20
+		}
+		s.updateConcurrencyLimitIfNeeded(userLimit)
+	}
+
+	// Run backup asynchronously with concurrency control
+	go func() {
+		// Acquire semaphore (blocks if limit reached)
+		s.concurrencyMutex.RLock()
+		sem := s.concurrencySemaphore
+		s.concurrencyMutex.RUnlock()
+		
+		sem <- struct{}{} // Acquire slot
+		defer func() { <-sem }() // Release slot when done
+
+		s.executeBackup(backup, conn, backupPath, filename, s3ProviderIDs)
+	}()
 
 	return backup, nil
 }
 
+// StopBackup stops a running backup by killing its command
+func (s *BackupService) StopBackup(backupID string) error {
+	s.runningCommandsMutex.Lock()
+	cmd, cmdExists := s.runningCommands[backupID]
+	s.runningCommandsMutex.Unlock()
+
+	s.runningContextsMutex.Lock()
+	cancel, ctxExists := s.runningContexts[backupID]
+	s.runningContextsMutex.Unlock()
+
+	if !cmdExists && !ctxExists {
+		return fmt.Errorf("backup %s is not running", backupID)
+	}
+
+	// Get backup to check status
+	backup, err := s.backupRepo.GetBackup(backupID)
+	if err != nil {
+		return fmt.Errorf("failed to get backup: %v", err)
+	}
+
+	if backup.Status != "in_progress" {
+		return fmt.Errorf("backup %s is not in progress (status: %s)", backupID, backup.Status)
+	}
+
+	s.sendLog(backupID, "[INFO] Stopping backup...")
+
+	// Cancel the context first (this signals cancellation to any context-aware operations)
+	if cancel != nil {
+		cancel()
+		s.sendLog(backupID, "[INFO] Backup context cancelled")
+	}
+
+	// Try graceful termination first (SIGTERM)
+	if cmd != nil && cmd.Process != nil {
+		// Send SIGTERM for graceful shutdown
+		if err := cmd.Process.Signal(os.Interrupt); err == nil {
+			s.sendLog(backupID, "[INFO] Sent interrupt signal to backup process")
+			// Wait a moment for graceful shutdown
+			time.Sleep(2 * time.Second)
+		}
+		
+		// Force kill if still running (SIGKILL)
+		if err := cmd.Process.Kill(); err != nil {
+			s.sendLog(backupID, fmt.Sprintf("[ERROR] Failed to kill backup process: %v", err))
+			return fmt.Errorf("failed to kill backup process: %v", err)
+		}
+		s.sendLog(backupID, "[INFO] Backup process terminated")
+	}
+
+	s.sendLog(backupID, "[INFO] Backup stopped by user - PostgreSQL server will cancel the query")
+
+	// Update backup status
+	backup.Status = "cancelled"
+	now := time.Now()
+	backup.CompletedTime = &now
+	if err := s.backupRepo.UpdateBackup(backup); err != nil {
+		s.sendLog(backupID, fmt.Sprintf("[ERROR] Failed to update backup status: %v", err))
+		return fmt.Errorf("failed to update backup status: %v", err)
+	}
+
+	// Clean up tracking
+	s.runningCommandsMutex.Lock()
+	delete(s.runningCommands, backupID)
+	s.runningCommandsMutex.Unlock()
+
+	s.runningContextsMutex.Lock()
+	delete(s.runningContexts, backupID)
+	s.runningContextsMutex.Unlock()
+
+	return nil
+}
+
+// updateConcurrencyLimitIfNeeded updates the concurrency limit if the new limit is higher
+// This ensures we can handle the maximum required concurrency across all users
+func (s *BackupService) updateConcurrencyLimitIfNeeded(newLimit int) {
+	s.concurrencyMutex.Lock()
+	defer s.concurrencyMutex.Unlock()
+
+	// Only update if new limit is higher (we use the maximum needed)
+	if newLimit > s.concurrencyLimit {
+		// Create new semaphore with higher capacity
+		newSem := make(chan struct{}, newLimit)
+		
+		// Copy any currently acquired slots to new semaphore
+		currentAcquired := len(s.concurrencySemaphore)
+		for i := 0; i < currentAcquired; i++ {
+			newSem <- struct{}{}
+		}
+		
+		// Replace old semaphore with new one
+		s.concurrencySemaphore = newSem
+		s.concurrencyLimit = newLimit
+		fmt.Printf("Updated backup concurrency limit to %d\n", newLimit)
+	}
+}
+
+// SetConcurrencyLimit explicitly sets the concurrency limit (for external updates)
+func (s *BackupService) SetConcurrencyLimit(limit int) {
+	if limit < 1 {
+		limit = 1
+	} else if limit > 20 {
+		limit = 20
+	}
+
+	s.concurrencyMutex.Lock()
+	defer s.concurrencyMutex.Unlock()
+
+	if limit != s.concurrencyLimit {
+		// Create new semaphore with new capacity
+		newSem := make(chan struct{}, limit)
+		
+		// Copy currently acquired slots (up to new limit)
+		currentAcquired := len(s.concurrencySemaphore)
+		copyCount := currentAcquired
+		if copyCount > limit {
+			copyCount = limit
+		}
+		for i := 0; i < copyCount; i++ {
+			newSem <- struct{}{}
+		}
+		
+		// Replace old semaphore with new one
+		s.concurrencySemaphore = newSem
+		s.concurrencyLimit = limit
+		fmt.Printf("Set backup concurrency limit to %d\n", limit)
+	}
+}
+
 // executeBackup executes the actual backup process
 func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredConnection, backupPath string, filename string, s3ProviderIDs []string) {
+	// Create a cancellable context for this backup
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	// Store the cancel function for stopping the backup
+	s.runningContextsMutex.Lock()
+	s.runningContexts[backup.ID.String()] = cancel
+	s.runningContextsMutex.Unlock()
+	
+	// Clean up context tracking when done
+	defer func() {
+		s.runningContextsMutex.Lock()
+		delete(s.runningContexts, backup.ID.String())
+		s.runningContextsMutex.Unlock()
+		cancel()
+	}()
+	
 	// Setup SSH tunnel if enabled
 	tunnel, effectiveHost, effectivePort, err := s.setupSSHTunnelIfNeeded(conn)
 	if err != nil {
@@ -319,6 +501,18 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 		return
 	}
 
+	// Track the running command for cancellation
+	s.runningCommandsMutex.Lock()
+	s.runningCommands[backup.ID.String()] = cmd
+	s.runningCommandsMutex.Unlock()
+
+	// Clean up command tracking when done
+	defer func() {
+		s.runningCommandsMutex.Lock()
+		delete(s.runningCommands, backup.ID.String())
+		s.runningCommandsMutex.Unlock()
+	}()
+
 	// Stream stderr for logs
 	var wg sync.WaitGroup
 	var outputErr error
@@ -394,7 +588,7 @@ func (s *BackupService) executeBackup(backup *Backup, conn *connection.StoredCon
 
 	// Stream compressed data to S3
 	// UploadCompressedStream will add .gz extension and apply path prefix
-	ctx := context.Background()
+	// Use the existing ctx from the function start (can be cancelled)
 	sanitizedConnectionName := common.SanitizeConnectionName(conn.Name)
 	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Streaming compressed backup to %s", firstProvider.Name))
 	s.sendLog(backup.ID.String(), fmt.Sprintf("[INFO] Bucket: %s", s3Storage.GetBucket()))
@@ -680,6 +874,18 @@ func (s *BackupService) CreateBackup(connectionID string) (*Backup, error) {
 		s.cleanupLogStream(backupID.String())
 		return nil, fmt.Errorf("failed to start backup command: %v", err)
 	}
+
+	// Track the running command for cancellation
+	s.runningCommandsMutex.Lock()
+	s.runningCommands[backupID.String()] = cmd
+	s.runningCommandsMutex.Unlock()
+
+	// Clean up command tracking when done
+	defer func() {
+		s.runningCommandsMutex.Lock()
+		delete(s.runningCommands, backupID.String())
+		s.runningCommandsMutex.Unlock()
+	}()
 
 	// Stream stdout and stderr
 	var wg sync.WaitGroup
@@ -1060,24 +1266,53 @@ func (s *BackupService) verifyUploadedBackup(ctx context.Context, s3Storage *S3S
 	// For uncompressed files (file-based backups), verify checksum matches
 	// For compressed files (streaming backups), we just verify the file exists and has content
 	if !strings.HasSuffix(objectKey, ".gz") && backup.SHA256Hash != nil && *backup.SHA256Hash != "" {
-		// This is an uncompressed file, verify checksum
-		_, downloadedSHA256, err := CalculateFileChecksums(tmpPath)
-		if err != nil {
-			return fmt.Errorf("failed to calculate checksum of downloaded file: %w", err)
-		}
+		storedHash := strings.TrimSpace(*backup.SHA256Hash)
+		// Only verify if stored checksum is valid (64 hex characters)
+		if isValidSHA256Hash(storedHash) {
+			// This is an uncompressed file, verify checksum
+			_, downloadedSHA256, err := CalculateFileChecksums(tmpPath)
+			if err != nil {
+				return fmt.Errorf("failed to calculate checksum of downloaded file: %w", err)
+			}
 
-		if downloadedSHA256 != *backup.SHA256Hash {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", *backup.SHA256Hash, downloadedSHA256)
+			if strings.ToLower(downloadedSHA256) != strings.ToLower(storedHash) {
+				return fmt.Errorf("checksum mismatch: expected %s, got %s", storedHash, downloadedSHA256)
+			}
 		}
+		// If stored checksum is invalid, skip verification (data might be corrupted in DB)
 	}
 
 	return nil
+}
+
+// isValidSHA256Hash validates that a string is a valid SHA256 hash (64 hex characters)
+func isValidSHA256Hash(hash string) bool {
+	if len(hash) != 64 {
+		return false
+	}
+	for _, c := range hash {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // verifyBackupBeforeRestore verifies the backup file integrity before restore
 func (s *BackupService) verifyBackupBeforeRestore(backup *Backup, filePath string) error {
 	if backup.SHA256Hash == nil || *backup.SHA256Hash == "" {
 		// No checksum stored, skip verification
+		return nil
+	}
+
+	// Validate stored checksum format
+	storedHash := strings.TrimSpace(*backup.SHA256Hash)
+	if !isValidSHA256Hash(storedHash) {
+		// Stored checksum is invalid/corrupted, skip verification silently
+		// This can happen if the database column was too short or data was corrupted
+		// Log a warning but don't block the restore
+		fmt.Printf("WARNING: Stored checksum is invalid or corrupted (length: %d, expected: 64 hex characters). Stored value: %s. Skipping verification and proceeding with restore.\n", 
+			len(storedHash), storedHash)
 		return nil
 	}
 
@@ -1092,9 +1327,9 @@ func (s *BackupService) verifyBackupBeforeRestore(backup *Backup, filePath strin
 		return fmt.Errorf("failed to calculate checksum: %w", err)
 	}
 
-	// Compare checksums
-	if calculatedSHA256 != *backup.SHA256Hash {
-		return fmt.Errorf("checksum mismatch: expected %s, got %s. File may be corrupted", *backup.SHA256Hash, calculatedSHA256)
+	// Compare checksums (case-insensitive comparison)
+	if strings.ToLower(calculatedSHA256) != strings.ToLower(storedHash) {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s. File may be corrupted", storedHash, calculatedSHA256)
 	}
 
 	return nil

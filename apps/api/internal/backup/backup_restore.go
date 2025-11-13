@@ -13,8 +13,10 @@ import (
 )
 
 type RestoreRequest struct {
-	BackupID     string `json:"backup_id"`
-	ConnectionID string `json:"connection_id"`
+	BackupID          string `json:"backup_id"`
+	ConnectionID     string `json:"connection_id"`
+	TargetDatabaseName string `json:"target_database_name,omitempty"` // Optional: restore to different database name
+	SkipChecksumVerification bool `json:"skip_checksum_verification,omitempty"` // Optional: skip checksum verification
 }
 
 var restoreTools = map[string]string{
@@ -25,7 +27,9 @@ var restoreTools = map[string]string{
 }
 
 // RestoreBackup restores a backup to a target database connection
-func (s *BackupService) RestoreBackup(backupID string, connectionID string) error {
+// If targetDatabaseName is provided, restores to that database name instead of the connection's database name
+// If skipChecksumVerification is true, skips checksum verification even if checksum is valid
+func (s *BackupService) RestoreBackup(backupID string, connectionID string, targetDatabaseName string, skipChecksumVerification bool) error {
 	backup, err := s.backupRepo.GetBackup(backupID)
 	if err != nil {
 		return fmt.Errorf("failed to get backup: %v", err)
@@ -57,8 +61,15 @@ func (s *BackupService) RestoreBackup(backupID string, connectionID string) erro
 	}
 
 	// Pre-restore verification: Verify backup file integrity before restore
-	if err := s.verifyBackupBeforeRestore(backup, backup.Path); err != nil {
-		return fmt.Errorf("backup integrity verification failed: %w", err)
+	// Invalid checksum format is handled inside verifyBackupBeforeRestore (logs warning and returns nil)
+	// Only actual checksum mismatches or other errors will fail the restore
+	// Skip verification if explicitly requested
+	if !skipChecksumVerification {
+		if err := s.verifyBackupBeforeRestore(backup, backup.Path); err != nil {
+			return fmt.Errorf("backup integrity verification failed: %w", err)
+		}
+	} else {
+		fmt.Printf("INFO: Skipping checksum verification as requested by user.\n")
 	}
 
 	conn, err := s.connStorage.GetConnection(connectionID)
@@ -80,14 +91,20 @@ func (s *BackupService) RestoreBackup(backupID string, connectionID string) erro
 		conn.Port = effectivePort
 	}
 
+	// Use target database name if provided, otherwise use connection's database name
+	databaseName := conn.DatabaseName
+	if targetDatabaseName != "" {
+		databaseName = targetDatabaseName
+	}
+
 	var cmd *exec.Cmd
 	switch conn.Type {
 	case "postgresql":
-		cmd = s.createPsqlRestoreCmd(conn, backup.Path)
+		cmd = s.createPsqlRestoreCmd(conn, backup.Path, databaseName)
 	case "mysql", "mariadb":
-		cmd = s.createMySQLRestoreCmd(conn, backup.Path)
+		cmd = s.createMySQLRestoreCmd(conn, backup.Path, databaseName)
 	case "mongodb":
-		cmd = s.createMongoRestoreCmd(conn, backup.Path)
+		cmd = s.createMongoRestoreCmd(conn, backup.Path, databaseName)
 	default:
 		return fmt.Errorf("unsupported database type for restore: %s", conn.Type)
 	}
@@ -97,7 +114,7 @@ func (s *BackupService) RestoreBackup(backupID string, connectionID string) erro
 	}
 
 	output, err := cmd.CombinedOutput()
-	return s.validateRestoreOutput(conn.Type, conn.DatabaseName, output, err)
+	return s.validateRestoreOutput(conn.Type, databaseName, output, err)
 }
 
 func (s *BackupService) validateRestoreOutput(dbType, dbName string, output []byte, cmdErr error) error {
@@ -194,7 +211,7 @@ func (s *BackupService) findDatabaseRestorePath(dbType string) string {
 	return ""
 }
 
-func (s *BackupService) createPsqlRestoreCmd(conn *connection.StoredConnection, backupPath string) *exec.Cmd {
+func (s *BackupService) createPsqlRestoreCmd(conn *connection.StoredConnection, backupPath string, databaseName string) *exec.Cmd {
 	binaryPath := s.findDatabaseRestorePath("postgresql")
 	if binaryPath == "" {
 		fmt.Printf("ERROR: psql binary not found. Please install PostgreSQL client tools.\n")
@@ -209,7 +226,7 @@ func (s *BackupService) createPsqlRestoreCmd(conn *connection.StoredConnection, 
 		"-h", conn.Host,
 		"-p", fmt.Sprintf("%d", conn.Port),
 		"-U", conn.Username,
-		"-d", conn.DatabaseName,
+		"-d", databaseName,
 		"-f", backupPath,
 		"-v", "ON_ERROR_STOP=1", // Exit on first error
 	)
@@ -218,7 +235,7 @@ func (s *BackupService) createPsqlRestoreCmd(conn *connection.StoredConnection, 
 	return cmd
 }
 
-func (s *BackupService) createMySQLRestoreCmd(conn *connection.StoredConnection, backupPath string) *exec.Cmd {
+func (s *BackupService) createMySQLRestoreCmd(conn *connection.StoredConnection, backupPath string, databaseName string) *exec.Cmd {
 	binaryPath := s.findDatabaseRestorePath(conn.Type)
 	if binaryPath == "" {
 		fmt.Printf("ERROR: mysql binary not found. Please install MySQL/MariaDB client tools.\n")
@@ -232,7 +249,7 @@ func (s *BackupService) createMySQLRestoreCmd(conn *connection.StoredConnection,
 		"-P", fmt.Sprintf("%d", conn.Port),
 		"-u", conn.Username,
 		fmt.Sprintf("-p%s", conn.Password),
-		conn.DatabaseName,
+		databaseName,
 	)
 
 	file, err := os.Open(backupPath)
@@ -245,7 +262,7 @@ func (s *BackupService) createMySQLRestoreCmd(conn *connection.StoredConnection,
 	return cmd
 }
 
-func (s *BackupService) createMongoRestoreCmd(conn *connection.StoredConnection, backupPath string) *exec.Cmd {
+func (s *BackupService) createMongoRestoreCmd(conn *connection.StoredConnection, backupPath string, databaseName string) *exec.Cmd {
 	binaryPath := s.findDatabaseRestorePath("mongodb")
 	if binaryPath == "" {
 		fmt.Printf("ERROR: mongorestore binary not found. Please install MongoDB Database Tools.\n")
@@ -259,7 +276,7 @@ func (s *BackupService) createMongoRestoreCmd(conn *connection.StoredConnection,
 	args := []string{
 		"--host", conn.Host,
 		"--port", fmt.Sprintf("%d", conn.Port),
-		"--db", conn.DatabaseName,
+		"--db", databaseName,
 		backupDir,
 	}
 
