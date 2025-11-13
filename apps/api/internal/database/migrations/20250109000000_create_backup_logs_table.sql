@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS backup_logs (
 );
 
 -- Create indexes for efficient querying
-CREATE INDEX idx_backup_logs_backup_id ON backup_logs(backup_id);
-CREATE INDEX idx_backup_logs_backup_id_line_number ON backup_logs(backup_id, line_number);
+CREATE INDEX IF NOT EXISTS idx_backup_logs_backup_id ON backup_logs(backup_id);
+CREATE INDEX IF NOT EXISTS idx_backup_logs_backup_id_line_number ON backup_logs(backup_id, line_number);
 
 -- +goose StatementEnd
 
