@@ -51,6 +51,10 @@ export const getScheduleFrequency = (cronSchedule: string | undefined) => {
       return "test"; // Updated to match 1-minute schedule
     case "0 0 * * * *":
       return "hourly";
+    case "0 0 */3 * * *":
+      return "every3hours";
+    case "0 0 */6 * * *":
+      return "every6hours";
     case "0 0 0 * * *":
       return "daily";
     case "0 0 0 * * 0":

@@ -23,7 +23,9 @@ import { getScheduleFrequency } from '@/lib/helper';
 
 const CRON_SCHEDULES = {
   'test': '0 */1 * * * *',  // Run every 1 minutes
-  'hourly': '0 0 * * * *',
+  'hourly': '0 0 * * * *',  // Every 1 hour
+  'every3hours': '0 0 */3 * * *',  // Every 3 hours
+  'every6hours': '0 0 */6 * * *',  // Every 6 hours
   'daily': '0 0 0 * * *',
   'weekly': '0 0 0 * * 0',
   'monthly': '0 0 0 1 * *'
@@ -153,7 +155,9 @@ export function BackupScheduleDialog({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="test">Every Minute (Test)</SelectItem>
-                    <SelectItem value="hourly">Every Hour</SelectItem>
+                    <SelectItem value="hourly">Every 1 Hour</SelectItem>
+                    <SelectItem value="every3hours">Every 3 Hours</SelectItem>
+                    <SelectItem value="every6hours">Every 6 Hours</SelectItem>
                     <SelectItem value="daily">Daily</SelectItem>
                     <SelectItem value="weekly">Weekly</SelectItem>
                     <SelectItem value="monthly">Monthly</SelectItem>
