@@ -285,8 +285,11 @@ export function BackupJobViewer({ open, onOpenChange, backupId, backup: initialB
 
         // If no logs arrive after 2 seconds, try fetching stored logs (backup might be completed)
         streamTimeout = setTimeout(async () => {
-          if (!streamEndedRef.current && logs.length === 0) {
-            await fetchStoredLogs();
+          if (!streamEndedRef.current) {
+            const currentLogs = await getBackupLogs(backupId);
+            if (!currentLogs || currentLogs.trim() === '') {
+              await fetchStoredLogs();
+            }
           }
         }, 2000);
       };
@@ -378,7 +381,7 @@ export function BackupJobViewer({ open, onOpenChange, backupId, backup: initialB
           {/* Left Panel - Steps */}
           <div className="w-80 border-r bg-muted/30 p-4 overflow-y-auto">
             <div className="space-y-2">
-              {steps.map((step, index) => (
+              {steps.map((step) => (
                 <div
                   key={step.id}
                   className={cn(

@@ -300,10 +300,11 @@ export function NotificationSettings() {
                               description: "No recent chats found. Make sure your bot has received messages.",
                             });
                           }
-                        } catch (error: any) {
+                        } catch (error: Error | unknown) {
+                          const errorMessage = error instanceof Error ? error.message : "Failed to load chats";
                           toast({
                             title: "Error",
-                            description: error.message || "Failed to load chats",
+                            description: errorMessage,
                             variant: "destructive",
                           });
                         } finally {
@@ -394,11 +395,12 @@ export function NotificationSettings() {
                             title: "Success",
                             description: `Connection successful! Chat: ${response.data.title || response.data.first_name || response.data.id}`,
                           });
-                        } catch (error: any) {
+                        } catch (error: Error | unknown) {
                           setChatInfo(null);
+                          const errorMessage = error instanceof Error ? error.message : "Failed to test connection";
                           toast({
                             title: "Error",
-                            description: error.message || "Failed to test connection",
+                            description: errorMessage,
                             variant: "destructive",
                           });
                         } finally {

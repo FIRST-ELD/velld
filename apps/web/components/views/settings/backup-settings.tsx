@@ -8,7 +8,6 @@ import { Label } from "@/components/ui/label";
 import { Database, Info } from "lucide-react";
 import { useSettings } from "@/hooks/use-settings";
 import { Skeleton } from "@/components/ui/skeleton";
-import { UpdateSettingsRequest } from "@/types/settings";
 import { useToast } from "@/hooks/use-toast";
 
 export function BackupSettings() {
@@ -63,10 +62,11 @@ export function BackupSettings() {
         title: "Success",
         description: "Backup concurrency limit updated successfully",
       });
-    } catch (error: any) {
+    } catch (error: Error | unknown) {
+      const errorMessage = error instanceof Error ? error.message : "Failed to update concurrency limit";
       toast({
         title: "Error",
-        description: error.message || "Failed to update concurrency limit",
+        description: errorMessage,
         variant: "destructive",
       });
     }

@@ -191,7 +191,7 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
                     className="font-mono"
                   />
                   <p className="text-xs text-muted-foreground">
-                    The database must already exist. If it doesn't exist, create it first on the target server.
+                    The database must already exist. If it doesn&apos;t exist, create it first on the target server.
                   </p>
                 </div>
               )}
@@ -212,7 +212,7 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
               <Alert>
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription className="text-sm">
-                  <strong>Important:</strong> The target database must exist. If you're restoring to a different database name, make sure to create it first on the target server.
+                  <strong>Important:</strong> The target database must exist. If you&apos;re restoring to a different database name, make sure to create it first on the target server.
                 </AlertDescription>
               </Alert>
               
@@ -229,7 +229,7 @@ export function RestoreDialog({ backup, open, onOpenChange }: RestoreDialogProps
                   htmlFor="skip-checksum"
                   className="text-sm leading-tight cursor-pointer flex-1"
                 >
-                  Skip checksum verification (use if you're getting checksum errors but know the file is correct)
+                  Skip checksum verification (use if you&apos;re getting checksum errors but know the file is correct)
                 </label>
               </div>
             </>

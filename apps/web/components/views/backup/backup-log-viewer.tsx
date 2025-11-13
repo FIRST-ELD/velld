@@ -80,9 +80,12 @@ export function BackupLogViewer({ backupId, open, onClose }: BackupLogViewerProp
         }
       } catch (error) {
         console.error("Failed to fetch stored logs:", error);
-        if (logs.length === 0) {
-          setLogs(["[ERROR] Failed to load backup logs"]);
-        }
+        setLogs((prevLogs) => {
+          if (prevLogs.length === 0) {
+            return ["[ERROR] Failed to load backup logs"];
+          }
+          return prevLogs;
+        });
       } finally {
         setIsLoading(false);
       }
@@ -105,7 +108,7 @@ export function BackupLogViewer({ backupId, open, onClose }: BackupLogViewerProp
     if (logsEndRef.current) {
       logsEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [logs]);
+  }, [logs.length]);
 
   const copyToClipboard = async (text: string, index: number) => {
     try {

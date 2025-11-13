@@ -24,7 +24,7 @@ import { useState, useMemo } from "react";
 import { useIsFetching } from "@tanstack/react-query";
 
 export function HistoryList() {
-  const { backups, isLoading, pagination, page, setPage, downloadBackupFile, isDownloading, search, setSearch, stopBackupProcess, isStopping } = useBackup();
+  const { backups, isLoading, pagination, page, setPage, isDownloading, search, setSearch, stopBackupProcess, isStopping } = useBackup();
   const { notifications, isLoading: isLoadingNotifications, markNotificationsAsRead } = useNotifications();
   const [compareDialogOpen, setCompareDialogOpen] = useState(false);
   const [selectedBackupForCompare, setSelectedBackupForCompare] = useState<BackupList | undefined>();

@@ -10,7 +10,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { getBackupS3Providers, createShareableLink, downloadBackup, type BackupS3Provider, type ShareableLink } from "@/lib/api/backups";
 import { useS3Providers } from "@/hooks/use-s3-providers";
 import { useToast } from "@/hooks/use-toast";
-import { Download, Link2, Copy, Check } from "lucide-react";
+import { Download, Link2, Copy } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 interface DownloadBackupDialogProps {
@@ -75,11 +75,12 @@ export function DownloadBackupDialog({ open, onOpenChange, backupId, backupPath 
       });
       onOpenChange(false);
     },
-    onError: (error: any) => {
+    onError: (error: Error | unknown) => {
       console.error("Download mutation error:", error);
+      const errorMessage = error instanceof Error ? error.message : "Failed to download backup";
       toast({
         title: "Error",
-        description: error?.message || "Failed to download backup",
+        description: errorMessage,
         variant: "destructive",
       });
     },
@@ -97,17 +98,18 @@ export function DownloadBackupDialog({ open, onOpenChange, backupId, backupPath 
         throw error;
       }
     },
-    onSuccess: (link) => {
+    onSuccess: () => {
       toast({
         title: "Success",
         description: "Shareable link created successfully",
       });
     },
-    onError: (error: any) => {
+    onError: (error: Error | unknown) => {
       console.error("Create link mutation error:", error);
+      const errorMessage = error instanceof Error ? error.message : "Failed to create shareable link";
       toast({
         title: "Error",
-        description: error?.message || "Failed to create shareable link",
+        description: errorMessage,
         variant: "destructive",
       });
     },
